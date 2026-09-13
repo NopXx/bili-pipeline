@@ -1,0 +1,985 @@
+#!/usr/bin/env python3
+"""
+Tiny episode-picker UI in front of pull.sh. Paste a Bilibili link, it parses the
+episode list (via bili_pull.py --parse-only), you tick the ones you want, and it
+runs the download -> HLS -> Drive pipeline for just those.
+
+Runs on the Bili23 VPS. stdlib only. Gate it with a token:
+
+    BILI_WEB_TOKEN=<secret> python3 scripts/bili_web.py        # binds 127.0.0.1:8787
+
+Binds loopback by default — reach it over an SSH tunnel, so nothing is exposed
+to the internet:  ssh -L 8787:localhost:8787 root@<vps>  then open localhost:8787.
+The token is still required for every /api call (X-Token header). Set
+BILI_WEB_HOST=0.0.0.0 only if you deliberately want it network-reachable.
+"""
+import base64
+import binascii
+import hmac
+import html
+import json
+import mimetypes
+import os
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+from urllib.parse import parse_qs, unquote, urlparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PULL = os.path.join(HERE, "scripts", "pull.sh")
+BILI_PULL = os.path.join(HERE, "scripts", "bili_pull.py")
+PROCESS_MEDIA = os.path.join(HERE, "scripts", "process_media.py")
+TORRENT_DOWNLOAD = os.path.join(HERE, "scripts", "torrent_download.py")
+DRIVE_FILES = os.path.join(HERE, "scripts", "drive_files.mjs")
+JOBS_DIR = os.path.join(HERE, "jobs")
+DOWNLOADS_DIR = os.path.realpath(os.environ.get("BILI_DOWNLOADS_DIR", "/opt/bili-downloads"))
+TORRENT_DOWNLOADS_DIR = os.path.realpath(os.path.join(DOWNLOADS_DIR, "torrents"))
+FRONTEND_DIR = os.path.realpath(os.path.join(HERE, "frontend"))
+TOKEN = os.environ.get("BILI_WEB_TOKEN") or ""
+HOST = os.environ.get("BILI_WEB_HOST", "127.0.0.1")  # loopback; tunnel in over SSH
+PORT = int(os.environ.get("BILI_WEB_PORT", "8787"))
+
+os.makedirs(JOBS_DIR, exist_ok=True)
+os.makedirs(TORRENT_DOWNLOADS_DIR, exist_ok=True)
+jobs = {}  # job_id -> {"proc": Popen, "log": path}
+
+PAGE = """<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Bili -> Drive</title><style>
+:root{color-scheme:dark}
+body{background:#0d0f13;color:#e6e8eb;font:15px/1.5 system-ui,sans-serif;margin:0;padding:24px;max-width:900px;margin:0 auto}
+h1{font-size:18px;margin:0 0 16px}
+input,button{font:inherit}
+input[type=text]{width:100%;box-sizing:border-box;padding:10px;background:#171a1f;border:1px solid #2a2f37;border-radius:8px;color:inherit}
+button{padding:9px 16px;background:#2563eb;border:0;border-radius:8px;color:#fff;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+button.sec{background:#2a2f37}
+.row{display:flex;gap:8px;margin:12px 0}
+.ep{display:flex;gap:10px;align-items:center;padding:7px 10px;border-bottom:1px solid #1c2027}
+.ep:hover{background:#141821}
+.ep .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ep .d{color:#8b93a1;font-size:13px}
+.bar{display:flex;gap:8px;align-items:center;margin:12px 0}
+#list{border:1px solid #2a2f37;border-radius:8px;max-height:52vh;overflow:auto;margin:8px 0}
+label.sa{color:#8b93a1;font-size:14px;display:flex;gap:6px;align-items:center}
+pre{background:#0a0c10;border:1px solid #1c2027;border-radius:8px;padding:12px;overflow:auto;max-height:40vh;white-space:pre-wrap;font-size:13px}
+.msg{color:#f59e0b;min-height:20px}
+.tabs{display:flex;gap:8px;margin-bottom:16px}
+.tab{background:#171a1f}
+.tab.active{background:#2563eb}
+button.danger{background:#b91c1c}
+.flist{border:1px solid #2a2f37;border-radius:8px;max-height:44vh;overflow:auto;margin:8px 0}
+.fhead{display:flex;gap:8px;align-items:center;margin-top:8px}
+.fsec{margin-bottom:22px}
+.status{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:12px 0}
+.card{background:#141821;border:1px solid #2a2f37;border-radius:8px;padding:10px}
+.card small{display:block;color:#8b93a1}.ok{color:#34d399}.bad{color:#f87171}
+.progress{height:10px;background:#20252d;border-radius:99px;overflow:hidden;margin:8px 0;display:none}
+.progress>div{height:100%;width:0;background:#2563eb;transition:width .3s}
+.job-actions{display:flex;gap:6px}.job-actions button{padding:5px 9px}
+.config{background:#141821;border:1px solid #2a2f37;border-radius:10px;padding:14px;margin:12px 0}
+.config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.config label{display:flex;flex-direction:column;gap:4px;color:#aeb5c0}
+.config select,.config input[type=text],.config input[type=number]{background:#171a1f;color:inherit;border:1px solid #2a2f37;border-radius:6px;padding:7px}
+.details{margin:10px 0;display:grid;gap:10px}.media-card{background:#11151b;border:1px solid #2a2f37;border-radius:8px;padding:12px}
+.media-card h3{font-size:14px;margin:0 0 8px;overflow-wrap:anywhere}.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px}
+.fact{background:#171a1f;border-radius:6px;padding:7px}.fact small{display:block;color:#8b93a1}
+.tracks{width:100%;border-collapse:collapse;margin-top:10px;font-size:12px}.tracks th,.tracks td{text-align:left;padding:6px;border-bottom:1px solid #2a2f37}.tracks th{color:#8b93a1}
+</style></head><body>
+<h1>Bilibili &rarr; HLS &rarr; Drive</h1>
+<div class=row>
+  <input id=token type=password placeholder="Access token">
+  <button class=sec id=save-token>Save token</button>
+</div>
+<div class=status id=system-status></div>
+<div class=tabs>
+  <button class="tab active" data-tab=download>Download</button>
+  <button class=tab data-tab=files>Files</button>
+  <button class=tab data-tab=jobs>Jobs</button>
+</div>
+<div id=tab-download>
+<div class=row>
+  <input id=url type=text placeholder="https://www.bilibili.com/video/BV... or a media id">
+  <button id=parse>Parse</button>
+</div>
+<div class=msg id=msg></div>
+<div class=bar id=bar style=display:none>
+  <label class=sa><input type=checkbox id=all> Select all</label>
+  <span id=count style=color:#8b93a1></span>
+  <span style=flex:1></span>
+  <label class=sa>Quality
+    <select id=quality style="background:#171a1f;color:inherit;border:1px solid #2a2f37;border-radius:6px;padding:5px">
+      <option value=4K selected>4K (H.264 SDR, no re-encode)</option>
+      <option value=1080P>1080p</option>
+      <option value=720P>720p</option>
+      <option value=480P>480p</option>
+      <option value=auto>Best available</option>
+    </select></label>
+  <label class=sa><input type=checkbox id=redl> Force redownload</label>
+  <button id=go>Download selected</button>
+  <button class=danger id=cancel style=display:none>Cancel</button>
+</div>
+<div id=list></div>
+<div class=progress id=progress><div></div></div>
+<div id=progress-label class=msg></div>
+<pre id=log style=display:none></pre>
+<div class=config id=hls-config hidden>
+  <b>2. HLS configuration</b>
+  <div id=ready-files class=msg></div>
+  <div id=convert-details class=details></div>
+  <div id=size-estimate class=msg></div>
+  <div class=config-grid>
+    <label>Video mode<select id=hls-mode><option value=copy>Copy H.264 (fastest)</option><option value=encode>Re-encode H.264</option><option value=ladder>Adaptive ladder</option></select></label>
+    <label>Ladder heights<input id=hls-heights type=text value="2160,1440,1080"></label>
+    <label>Video bitrate<input id=hls-vb type=text value="8M"></label>
+    <label>Audio outputs<select id=hls-audio><option value=2>Stereo AAC</option><option value=2,6>Stereo + 5.1 AAC</option><option value=2,6,raw>Stereo + 5.1 + original</option><option value=raw>Original audio</option></select></label>
+    <label>Audio bitrate<input id=hls-ab type=text value="192k"></label>
+    <label>Segment seconds<input id=hls-seg type=number min=2 max=30 value=6></label>
+    <label>Poster at second<input id=hls-poster type=number min=0 value=5></label>
+  </div>
+  <div class=row><label class=sa><input id=hls-gpu type=checkbox> GPU tonemap HDR</label><label class=sa><input id=hls-upload type=checkbox checked> Upload to Drive</label><label class=sa><input id=hls-keep type=checkbox> Keep HLS on VPS</label><span style=flex:1></span><button id=hls-start>Convert HLS</button></div>
+</div>
+</div>
+<div id=tab-files hidden>
+  <div class=fsec>
+    <div class=fhead><b>Downloads on VPS</b> <span id=dlsize style=color:#8b93a1></span>
+      <span style=flex:1></span>
+      <button class=sec id=dlrefresh>Refresh</button>
+      <button class=sec id=dlinspect>Inspect selected</button>
+      <button id=dlconvert>Convert selected to HLS</button>
+      <button class=danger id=dldel>Delete selected</button></div>
+    <div class=msg id=dlmsg></div>
+    <div id=file-details class=details></div>
+    <div id=dllist class=flist></div>
+  </div>
+  <div class=fsec>
+    <div class=fhead><b>Drive library folder</b> <span id=drsize style=color:#8b93a1></span>
+      <span style=flex:1></span>
+      <button class=sec id=drrefresh>Refresh</button>
+      <button class=danger id=drdel>Delete selected</button></div>
+    <div class=msg id=drmsg></div>
+    <div id=drlist class=flist></div>
+</div>
+</div>
+<div id=tab-jobs hidden>
+  <div class=fhead><b>Recent jobs</b><span style=flex:1></span><button class=sec id=jobrefresh>Refresh</button></div>
+  <div class=msg id=jobmsg></div><div id=joblist class=flist></div>
+</div>
+<script>
+const $=s=>document.querySelector(s)
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+let TOKEN=localStorage.getItem('bwt')||''
+let ACTIVE_JOB=localStorage.getItem('bwj')||''
+let READY_FILES=[]
+let PROBE_DATA=[]
+$('#token').value=TOKEN
+$('#save-token').onclick=()=>{
+  TOKEN=$('#token').value.trim()
+  if(TOKEN) localStorage.setItem('bwt',TOKEN)
+  else localStorage.removeItem('bwt')
+  health()
+}
+function ensureToken(){
+  if(!TOKEN) throw new Error('Enter the access token above, then press Save token')
+  return TOKEN
+}
+async function api(path,body){
+  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Token':ensureToken()},body:JSON.stringify(body||{})})
+  if(r.status===401){ localStorage.removeItem('bwt'); TOKEN=''; throw new Error('bad token — reload and re-enter') }
+  const j=await r.json(); if(!r.ok||j.error) throw new Error(j.error||('HTTP '+r.status)); return j
+}
+let eps=[]
+$('#parse').onclick=async()=>{
+  const url=$('#url').value.trim(); if(!url)return
+  $('#msg').textContent='parsing…'; $('#bar').style.display='none'; $('#list').innerHTML=''
+  try{ eps=await api('/api/parse',{url}); render() }catch(e){ $('#msg').textContent=e.message }
+}
+function render(){
+  $('#msg').textContent=''
+  if(!eps.length){ $('#msg').textContent='no episodes'; return }
+  $('#list').innerHTML=eps.map((e,i)=>`<div class=ep><input type=checkbox class=cb data-i=${i} ${e.needs_reparse?'disabled':''}>
+    <span class=t>${esc(e.title||('#'+(i+1)))}</span><span class=d>${esc(e.duration||'')}</span></div>`).join('')
+  // default to the whole collection selected — deselect to trim
+  document.querySelectorAll('.cb:not(:disabled)').forEach(c=>c.checked=true)
+  $('#all').checked=true
+  $('#bar').style.display='flex'; updateCount()
+  document.querySelectorAll('.cb').forEach(c=>c.onchange=updateCount)
+}
+function selected(){ return [...document.querySelectorAll('.cb:checked')].map(c=>eps[+c.dataset.i].episode_id) }
+function updateCount(){ $('#count').textContent=selected().length+' / '+eps.length }
+$('#all').onchange=e=>{ document.querySelectorAll('.cb:not(:disabled)').forEach(c=>c.checked=e.target.checked); updateCount() }
+$('#go').onclick=async()=>{
+  const ids=selected(); if(!ids.length){ $('#msg').textContent='select at least one'; return }
+  $('#go').disabled=true; $('#log').style.display='block'; $('#log').textContent='starting…'
+  try{
+    const {job}=await api('/api/pull',{url:$('#url').value.trim(),episode_ids:ids,quality:$('#quality').value,redownload:$('#redl').checked})
+    ACTIVE_JOB=job; localStorage.setItem('bwj',job)
+    $('#cancel').style.display='inline-block'; $('#cancel').disabled=false; $('#cancel').dataset.job=job
+    poll(job)
+  }catch(e){ $('#log').textContent=e.message; $('#go').disabled=false }
+}
+$('#cancel').onclick=async()=>{
+  const job=$('#cancel').dataset.job
+  if(!job||!confirm('Cancel this download and delete its partial files?'))return
+  $('#cancel').disabled=true
+  try{
+    const s=await api('/api/cancel',{job})
+    $('#log').textContent=s.log||'Cancelled'; $('#go').disabled=false; $('#cancel').style.display='none'
+  }catch(e){ $('#log').textContent+='\\nCancel failed: '+e.message; $('#cancel').disabled=false }
+}
+async function poll(job){
+  try{
+    const s=await api('/api/status',{job})
+    $('#log').textContent=s.log||''; $('#log').scrollTop=$('#log').scrollHeight
+    updateProgress(s.log||'',s.running,s.exit_code,s.cancelled)
+    if(!s.running&&s.state&&s.state.phase==='downloaded'&&s.state.files?.length){ showHlsConfig(s.state.files) }
+    if(s.running){ setTimeout(()=>poll(job),1500) } else { $('#go').disabled=false; $('#cancel').style.display='none'; ACTIVE_JOB=''; localStorage.removeItem('bwj'); health() }
+  }catch(e){ $('#log').textContent+='\\n'+e.message; $('#go').disabled=false; $('#cancel').style.display='none' }
+}
+async function showHlsConfig(files){
+  READY_FILES=files; $('#hls-config').hidden=false
+  $('#ready-files').textContent=files.length+' file(s) downloaded — choose settings before conversion'
+  $('#convert-details').innerHTML='<div class=msg>Reading media information…</div>'
+  try{ PROBE_DATA=await api('/api/probe',{paths:files}); $('#convert-details').innerHTML=renderMedia(PROBE_DATA); updateEstimate() }
+  catch(e){ $('#convert-details').innerHTML='<div class=msg>'+esc(e.message)+'</div>' }
+  $('#hls-config').scrollIntoView({behavior:'smooth',block:'start'})
+}
+$('#hls-mode').onchange=()=>{ $('#hls-heights').disabled=$('#hls-mode').value!=='ladder'; updateEstimate() }
+$('#hls-mode').onchange()
+$('#hls-start').onclick=async()=>{
+  if(!READY_FILES.length)return
+  $('#hls-start').disabled=true
+  const mode=$('#hls-mode').value
+  const config={files:READY_FILES,copy_video:mode==='copy',reencode:mode==='encode',ladder:mode==='ladder',ladder_heights:$('#hls-heights').value.trim(),video_bitrate:$('#hls-vb').value.trim(),audio_channels:$('#hls-audio').value,audio_bitrate:$('#hls-ab').value.trim(),segment_seconds:+$('#hls-seg').value,poster_seconds:+$('#hls-poster').value,gpu_tonemap:$('#hls-gpu').checked,copy_audio:$('#hls-audio').value.includes('raw'),upload:$('#hls-upload').checked,keep_local:$('#hls-keep').checked}
+  try{ const r=await api('/api/process',config); $('#hls-config').hidden=true; ACTIVE_JOB=r.job; localStorage.setItem('bwj',r.job); $('#cancel').style.display='inline-block'; $('#cancel').dataset.job=r.job; poll(r.job) }
+  catch(e){ $('#progress-label').textContent=e.message; $('#hls-start').disabled=false }
+}
+function updateProgress(log,running,exitCode,cancelled){
+  const matches=[...log.matchAll(/\\|\\s*(\\d{1,3})%\\s*\\|/g)], pct=matches.length?Math.min(100,+matches.at(-1)[1]):0
+  $('#progress').style.display=running||pct?'block':'none'; $('#progress>div').style.width=pct+'%'
+  let stage=''; if(/uploading:|pushing to Drive/i.test(log))stage='Uploading to Drive'; else if(/preparing HLS|HLS \\|/i.test(log))stage='Preparing HLS'; else if(/merg|ffmpeg_queued/i.test(log))stage='Merging'; else if(running)stage='Downloading'
+  if(!running)stage=cancelled?'Cancelled':(exitCode===0?'Completed':'Failed')
+  $('#progress-label').textContent=(stage||'')+(pct&&stage==='Downloading'?' · '+pct+'%':'')
+}
+
+// ---- tabs ----
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===b))
+  $('#tab-download').hidden = b.dataset.tab!=='download'
+  $('#tab-files').hidden = b.dataset.tab!=='files'
+  $('#tab-jobs').hidden = b.dataset.tab!=='jobs'
+  if(b.dataset.tab==='files'){ loadDownloads(); loadDrive() }
+  if(b.dataset.tab==='jobs')loadJobs()
+})
+function fmt(n){ n=+n||0; const u=['B','KB','MB','GB']; let i=0; while(n>=1024&&i<3){n/=1024;i++} return n.toFixed(i?1:0)+u[i] }
+function fmtRate(n){ n=+n||0; return n?(n/1000000).toFixed(2)+' Mbps':'unknown' }
+function fmtDur(n){ n=Math.round(+n||0); return [Math.floor(n/3600),Math.floor(n%3600/60),n%60].map(x=>String(x).padStart(2,'0')).join(':') }
+function fmtFps(v){ const p=String(v||'').split('/').map(Number); return p.length===2&&p[1]?(p[0]/p[1]).toFixed(3).replace(/0+$/,'').replace(/\\.$/,''):String(v||'?') }
+function renderMedia(rows){ return rows.map(m=>`<div class=media-card><h3>${esc(m.name)}</h3><div class=facts>
+  <div class=fact><small>Size / duration</small>${fmt(m.size)} · ${fmtDur(m.duration)}</div>
+  <div class=fact><small>Video</small>${esc(m.video.codec||'none')} ${esc(m.video.profile||'')} · ${m.video.width||'?'}×${m.video.height||'?'}</div>
+  <div class=fact><small>Video bitrate</small>${fmtRate(m.video.bit_rate)}</div>
+  <div class=fact><small>Color</small>${esc(m.video.pix_fmt||'?')} · ${m.video.hdr?'HDR':'SDR'}${m.video.dolby_vision?' · Dolby Vision':''}</div>
+  <div class=fact><small>Frame rate</small>${fmtFps(m.video.fps)} fps</div>
+  <div class=fact><small>Subtitles</small>${m.subtitles.length?m.subtitles.map(s=>esc(s.language||s.codec)).join(', '):'none'}</div></div>
+  ${m.audio.length?`<table class=tracks><thead><tr><th>#</th><th>Language / title</th><th>Codec</th><th>Channels</th><th>Sample</th><th>Bitrate</th><th>First packet</th></tr></thead><tbody>${m.audio.map(a=>`<tr><td>${a.index}</td><td>${esc(a.language||'und')} · ${esc(a.title||'')}</td><td>${esc(a.codec)} ${esc(a.profile||'')}</td><td>${a.channels||'?'} · ${esc(a.layout||'')}</td><td>${a.sample_rate?Math.round(a.sample_rate/1000)+' kHz':'?'}</td><td>${fmtRate(a.bit_rate)}</td><td>${(+a.first_packet||0).toFixed(3)}s</td></tr>`).join('')}</tbody></table>`:'<div class=msg>No audio streams</div>'}</div>`).join('') }
+function parseRate(s){ const m=String(s).trim().match(/^(\\d+(?:\\.\\d+)?)([mk])?$/i); if(!m)return 0; return +m[1]*(m[2]?.toLowerCase()==='m'?1e6:m[2]?1e3:1) }
+function updateEstimate(){
+  if(!PROBE_DATA.length)return
+  const mode=$('#hls-mode').value, vb=parseRate($('#hls-vb').value), ab=parseRate($('#hls-ab').value)||192000
+  let bytes=0
+  for(const m of PROBE_DATA){ let video=mode==='copy'?(+m.video.bit_rate||(+m.bit_rate||0)):vb
+    if(mode==='ladder'){ const rates={2160:16000000,1440:10000000,1080:8000000,720:4000000,480:2000000}; video=$('#hls-heights').value.split(',').reduce((n,h)=>n+(rates[+h]||0),0) }
+    const specs=$('#hls-audio').value.split(','), audio=specs.reduce((n,x)=>n+(x==='raw'?(+m.audio[0]?.bit_rate||0):ab),0)
+    bytes+=(video+audio)*(+m.duration||0)/8
+  }
+  $('#size-estimate').textContent='Estimated HLS size: '+fmt(bytes)+' (approximate)'
+}
+function fileRow(val,label,size){ return `<div class=ep><input type=checkbox class=fcb value="${encodeURIComponent(val)}">
+  <span class=t>${esc(label)}</span><span class=d>${fmt(size)}</span></div>` }
+function picked(container){ return [...document.querySelectorAll(container+' .fcb:checked')].map(c=>decodeURIComponent(c.value)) }
+
+// ---- downloads (VPS) ----
+async function loadDownloads(){
+  $('#dlmsg').textContent='loading…'; $('#dllist').innerHTML=''
+  try{
+    const files=await api('/api/files/downloads')
+    $('#dlsize').textContent=files.length+' files · '+fmt(files.reduce((a,f)=>a+ (+f.size||0),0))
+    $('#dllist').innerHTML=files.map(f=>fileRow(f.path,f.path.replace(/^.*\\/bili-downloads\\//,''),f.size)).join('')||'<div class=ep>empty</div>'
+    $('#dlmsg').textContent=''
+  }catch(e){ $('#dlmsg').textContent=e.message }
+}
+$('#dlrefresh').onclick=loadDownloads
+$('#dlinspect').onclick=async()=>{
+  const paths=picked('#dllist'); if(!paths.length){ $('#dlmsg').textContent='Select at least one file'; return }
+  $('#file-details').innerHTML='<div class=msg>Reading media information…</div>'
+  try{ const rows=await api('/api/probe',{paths}); $('#file-details').innerHTML=renderMedia(rows); $('#dlmsg').textContent='' }
+  catch(e){ $('#file-details').innerHTML=''; $('#dlmsg').textContent=e.message }
+}
+$('#dlconvert').onclick=()=>{
+  const paths=picked('#dllist')
+  if(!paths.length){ $('#dlmsg').textContent='Select at least one video file'; return }
+  const videoExt=/\\.(mp4|mkv|mov|webm|m4v)$/i
+  const unsupported=paths.filter(path=>!videoExt.test(path))
+  if(unsupported.length){ $('#dlmsg').textContent='Select finished video files only (.mp4, .mkv, .mov, .webm, .m4v)'; return }
+  document.querySelector('[data-tab=download]').click()
+  showHlsConfig(paths)
+}
+$('#dldel').onclick=async()=>{
+  const paths=picked('#dllist'); if(!paths.length)return
+  if(!confirm('Delete '+paths.length+' file(s) from the VPS? This cannot be undone.'))return
+  try{ const r=await api('/api/delete/downloads',{paths}); $('#dlmsg').textContent='deleted '+r.deleted+(r.failed?(' · failed '+r.failed):''); loadDownloads() }
+  catch(e){ $('#dlmsg').textContent=e.message }
+}
+
+// ---- drive ----
+async function loadDrive(){
+  $('#drmsg').textContent='loading…'; $('#drlist').innerHTML=''
+  try{
+    const files=await api('/api/files/drive')
+    // group flat bundle files by their shared base name (dot-free by design)
+    const g={}
+    for(const f of files){ const base=f.name.split('.')[0]; (g[base]=g[base]||{ids:[],size:0,count:0}); g[base].ids.push(f.id); g[base].size+=+f.size||0; g[base].count++ }
+    const groups=Object.entries(g)
+    $('#drsize').textContent=files.length+' files · '+groups.length+' bundles · '+fmt(files.reduce((a,f)=>a+(+f.size||0),0))
+    $('#drlist').innerHTML=groups.map(([base,x])=>fileRow(x.ids.join(','),base+'  ('+x.count+' files)',x.size)).join('')||'<div class=ep>empty</div>'
+    $('#drmsg').textContent=''
+  }catch(e){ $('#drmsg').textContent=e.message }
+}
+$('#drrefresh').onclick=loadDrive
+$('#drdel').onclick=async()=>{
+  const groups=picked('#drlist'); if(!groups.length)return
+  const ids=groups.join(',').split(',').filter(Boolean)
+  if(!confirm('Delete '+groups.length+' bundle(s) ('+ids.length+' files) from Drive? This cannot be undone.'))return
+  try{ const r=await api('/api/delete/drive',{ids}); $('#drmsg').textContent='deleted '+r.deleted+(r.failed?(' · failed '+r.failed):''); loadDrive() }
+  catch(e){ $('#drmsg').textContent=e.message }
+}
+async function health(){
+  if(!TOKEN){ $('#system-status').innerHTML='<div class=card><small>System</small>Enter access token</div>'; return }
+  try{ const h=await api('/api/health'); $('#system-status').innerHTML=`
+    <div class=card><small>Bili23</small><span class=${h.bili23==='active'?'ok':'bad'}>${esc(h.bili23)}</span></div>
+    <div class=card><small>Disk free</small>${fmt(h.disk_free)} / ${fmt(h.disk_total)}</div>
+    <div class=card><small>Active jobs</small>${h.active_jobs}</div>`
+  }catch(e){ $('#system-status').innerHTML='<div class=card><small>System</small><span class=bad>'+esc(e.message)+'</span></div>' }
+}
+async function loadJobs(){
+  $('#jobmsg').textContent='loading…'
+  try{ const rows=await api('/api/jobs'); $('#joblist').innerHTML=rows.map(j=>`<div class=ep>
+    <span class=t><b>${esc(j.status)}</b> · ${esc(j.url||j.job)}<br><span class=d>${esc(j.created||'')} · ${fmt(j.log_size)}</span></span>
+    <span class=job-actions><button class=sec data-open=${j.job}>Log</button>${j.url?`<button data-retry=${j.job}>Run again</button>`:''}</span></div>`).join('')||'<div class=ep>No jobs yet</div>'
+    document.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>openJob(b.dataset.open))
+    document.querySelectorAll('[data-retry]').forEach(b=>b.onclick=()=>retryJob(b.dataset.retry))
+    $('#jobmsg').textContent=''
+  }catch(e){ $('#jobmsg').textContent=e.message }
+}
+async function openJob(job){
+  const s=await api('/api/status',{job}); document.querySelector('[data-tab=download]').click()
+  $('#log').style.display='block'; $('#log').textContent=s.log||''; updateProgress(s.log||'',s.running,s.exit_code,s.cancelled)
+  if(s.running){ ACTIVE_JOB=job; localStorage.setItem('bwj',job); $('#go').disabled=true; $('#cancel').style.display='inline-block'; $('#cancel').dataset.job=job; poll(job) }
+}
+async function retryJob(job){
+  if(!confirm('Run this job again?'))return
+  const r=await api('/api/retry',{job}); ACTIVE_JOB=r.job; localStorage.setItem('bwj',r.job); document.querySelector('[data-tab=download]').click()
+  $('#go').disabled=true; $('#log').style.display='block'; $('#cancel').style.display='inline-block'; $('#cancel').dataset.job=r.job; poll(r.job)
+}
+$('#jobrefresh').onclick=loadJobs
+for(const id of ['hls-vb','hls-ab','hls-audio','hls-heights'])$('#'+id).addEventListener('input',updateEstimate)
+health()
+if(ACTIVE_JOB){ $('#go').disabled=true; $('#log').style.display='block'; $('#cancel').style.display='inline-block'; $('#cancel').dataset.job=ACTIVE_JOB; poll(ACTIVE_JOB) }
+</script></body></html>"""
+
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body, ctype="application/json"):
+        data = body if isinstance(body, bytes) else body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json_body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(n) or b"{}")
+
+    def _authed(self):
+        got = self.headers.get("X-Token") or ""
+        if not TOKEN or not hmac.compare_digest(got, TOKEN):
+            self._send(401, json.dumps({"error": "unauthorized"}))
+            return False
+        return True
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        relative = "index.html" if path == "/" else path.lstrip("/")
+        target = os.path.realpath(os.path.join(FRONTEND_DIR, relative))
+        if target != FRONTEND_DIR and target.startswith(FRONTEND_DIR + os.sep) and os.path.isfile(target):
+            with open(target, "rb") as f:
+                content = f.read()
+            ctype = mimetypes.guess_type(target)[0] or "application/octet-stream"
+            if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
+                ctype += "; charset=utf-8"
+            return self._send(200, content, ctype)
+        self._send(404, json.dumps({"error": "not found"}))
+
+    ROUTES = {
+        "/api/parse": "handle_parse",
+        "/api/pull": "handle_pull",
+        "/api/torrent": "handle_torrent",
+        "/api/status": "handle_status",
+        "/api/cancel": "handle_cancel",
+        "/api/health": "handle_health",
+        "/api/jobs": "handle_jobs",
+        "/api/retry": "handle_retry",
+        "/api/process": "handle_process",
+        "/api/upload": "handle_upload",
+        "/api/probe": "handle_probe",
+        "/api/files/downloads": "handle_list_downloads",
+        "/api/files/drive": "handle_list_drive",
+        "/api/delete/downloads": "handle_delete_downloads",
+        "/api/delete/drive": "handle_delete_drive",
+    }
+
+    def do_POST(self):
+        try:
+            handler = self.ROUTES.get(self.path)
+            if not handler:
+                return self._send(404, json.dumps({"error": "not found"}))
+            if not self._authed():
+                return
+            getattr(self, handler)(self._json_body())
+        except Exception as e:  # noqa: BLE001 — surface any error as JSON to the UI
+            self._send(500, json.dumps({"error": str(e)}))
+
+    def handle_parse(self, body):
+        url = (body.get("url") or "").strip()
+        if not url:
+            return self._send(400, json.dumps({"error": "url required"}))
+        env = {**os.environ, "BILI_PARSE_ONLY": "1"}
+        r = subprocess.run(
+            [sys.executable, BILI_PULL, url],
+            env=env, capture_output=True, text=True, timeout=150,
+        )
+        if r.returncode != 0:
+            return self._send(502, json.dumps({"error": (r.stderr or "parse failed").strip()[-800:]}))
+        self._send(200, r.stdout.strip() or "[]")
+
+    def handle_pull(self, body):
+        url = (body.get("url") or "").strip()
+        ids = body.get("episode_ids") or []
+        if not url or not ids:
+            return self._send(400, json.dumps({"error": "url and episode_ids required"}))
+        job = secrets.token_hex(8)
+        log_path = os.path.join(JOBS_DIR, job + ".log")
+        state_path = os.path.join(JOBS_DIR, job + ".json")
+        meta_path = os.path.join(JOBS_DIR, job + ".meta.json")
+        env = {
+            **os.environ,
+            "BILI_EPISODE_IDS": json.dumps(ids),
+            "BILI_JOB_STATE": state_path,
+            "BILI_DOWNLOAD_ONLY": "1",
+        }
+        q = (body.get("quality") or "").strip()
+        if q:
+            env["BILI_VIDEO_QUALITY"] = q
+        # Always ask for H.264: Bilibili serves an AVC stream at every quality
+        # here, 4K included, so prep-hls copies it instead of re-encoding HEVC.
+        # (Trade-off: the AVC 4K stream is SDR, not HDR.) If a quality has no
+        # AVC, Bili23 falls back to the next codec on its own.
+        env["BILI_VIDEO_CODEC"] = "AVC/H.264"
+        if body.get("redownload"):
+            env["BILI_REDOWNLOAD"] = "1"
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "job": job,
+                "url": url,
+                "episode_ids": ids,
+                "quality": q or "4K",
+                "redownload": bool(body.get("redownload")),
+                "kind": "download",
+                "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+            }, f, ensure_ascii=False, indent=2)
+        lf = open(log_path, "w")
+        proc = subprocess.Popen(
+            ["bash", PULL, url], env=env, stdout=lf, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        jobs[job] = {
+            "proc": proc,
+            "log": log_path,
+            "state": state_path,
+            "meta": meta_path,
+            "cancelled": False,
+        }
+        self._send(200, json.dumps({"job": job}))
+
+    def handle_torrent(self, body):
+        source = str(body.get("source") or "").strip()
+        encoded = str(body.get("torrent_data") or "").strip()
+        supplied_name = str(body.get("name") or "").strip()
+        if bool(source) == bool(encoded):
+            return self._send(400, json.dumps({"error": "ใส่ magnet/URL หรือเลือกไฟล์ .torrent อย่างใดอย่างหนึ่ง"}))
+        if source and not (source.startswith("magnet:?") or source.startswith("https://") or source.startswith("http://")):
+            return self._send(400, json.dumps({"error": "รองรับเฉพาะ magnet link และ URL http(s) ของไฟล์ .torrent"}))
+        if len(source) > 16384:
+            return self._send(400, json.dumps({"error": "torrent URL ยาวเกินไป"}))
+
+        job = secrets.token_hex(8)
+        torrent_path = ""
+        if encoded:
+            try:
+                payload = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                return self._send(400, json.dumps({"error": "ไฟล์ .torrent ไม่ถูกต้อง"}))
+            if not payload or len(payload) > 4 * 1024 * 1024 or not payload.startswith(b"d"):
+                return self._send(400, json.dumps({"error": "ไฟล์ .torrent ต้องเป็น bencode และมีขนาดไม่เกิน 4 MB"}))
+            torrent_path = os.path.join(JOBS_DIR, job + ".torrent")
+            with open(torrent_path, "wb") as handle:
+                handle.write(payload)
+            source_arg = torrent_path
+        else:
+            source_arg = source
+
+        inferred = ""
+        if source.startswith("magnet:?"):
+            inferred = unquote((parse_qs(urlparse(source).query).get("dn") or [""])[0])
+        elif source:
+            inferred = os.path.basename(unquote(urlparse(source).path)).removesuffix(".torrent")
+        elif supplied_name:
+            inferred = supplied_name.removesuffix(".torrent")
+        label = supplied_name or inferred or ("torrent-" + job[:8])
+        label = re.sub(r"[^\w .()\[\]-]+", "_", os.path.basename(label), flags=re.UNICODE).strip(" .")[:100]
+        if not label:
+            label = "torrent-" + job[:8]
+        destination = os.path.realpath(os.path.join(TORRENT_DOWNLOADS_DIR, f"{label}-{job[:6]}"))
+        if not destination.startswith(TORRENT_DOWNLOADS_DIR + os.sep):
+            return self._send(400, json.dumps({"error": "invalid torrent destination"}))
+
+        log_path = os.path.join(JOBS_DIR, job + ".log")
+        state_path = os.path.join(JOBS_DIR, job + ".json")
+        meta_path = os.path.join(JOBS_DIR, job + ".meta.json")
+        created = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        state = {"kind": "torrent", "phase": "queued", "status": "queued", "progress": 0, "destination": destination}
+        with open(state_path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, ensure_ascii=False, indent=2)
+        meta = {
+            "job": job, "kind": "torrent", "created": created, "name": label,
+            "source": source, "torrent_file": torrent_path, "destination": destination,
+        }
+        with open(meta_path, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, ensure_ascii=False, indent=2)
+        lf = open(log_path, "w")
+        proc = subprocess.Popen(
+            [sys.executable, TORRENT_DOWNLOAD, source_arg, destination, state_path],
+            env={**os.environ}, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+        jobs[job] = {"proc": proc, "log": log_path, "state": state_path, "meta": meta_path, "cancelled": False}
+        self._send(200, json.dumps({"job": job}))
+
+    def handle_process(self, body):
+        files = [str(item) for item in (body.get("files") or []) if item]
+        if not files:
+            return self._send(400, json.dumps({"error": "no files selected"}))
+        for path in files:
+            resolved = os.path.realpath(path)
+            if not resolved.startswith(DOWNLOADS_DIR + os.sep) or not os.path.isfile(resolved):
+                return self._send(400, json.dumps({"error": f"invalid downloaded file: {path}"}))
+        allowed = {
+            "files", "copy_video", "reencode", "ladder", "auto_hdr", "preserve_hdr",
+            "ladder_heights", "ladder_bitrates", "height", "video_bitrate",
+            "audio_channels", "audio_bitrate", "segment_seconds", "poster_seconds",
+            "gpu_tonemap", "copy_audio", "upload", "keep_local",
+        }
+        config = {key: body[key] for key in allowed if key in body}
+        config["files"] = [os.path.realpath(path) for path in files]
+        job = secrets.token_hex(8)
+        log_path = os.path.join(JOBS_DIR, job + ".log")
+        state_path = os.path.join(JOBS_DIR, job + ".json")
+        meta_path = os.path.join(JOBS_DIR, job + ".meta.json")
+        config_path = os.path.join(JOBS_DIR, job + ".config.json")
+        created = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"phase": "queued", "status": "queued", "files": config["files"]}, f, ensure_ascii=False, indent=2)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({"job": job, "kind": "hls", "created": created, **config}, f, ensure_ascii=False, indent=2)
+        lf = open(log_path, "w")
+        proc = subprocess.Popen(
+            [sys.executable, PROCESS_MEDIA, config_path, state_path],
+            env={**os.environ}, stdout=lf, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        jobs[job] = {"proc": proc, "log": log_path, "state": state_path, "meta": meta_path, "cancelled": False}
+        self._send(200, json.dumps({"job": job}))
+
+    def handle_upload(self, body):
+        # Upload the original files to Drive without any HLS conversion. Reuses the
+        # process_media worker (upload_source branch) so jobs/status/cancel/progress
+        # all behave exactly like a convert job.
+        files = [str(item) for item in (body.get("files") or []) if item]
+        if not files:
+            return self._send(400, json.dumps({"error": "no files selected"}))
+        for path in files:
+            resolved = os.path.realpath(path)
+            if not resolved.startswith(DOWNLOADS_DIR + os.sep) or not os.path.isfile(resolved):
+                return self._send(400, json.dumps({"error": f"invalid downloaded file: {path}"}))
+        config = {
+            "files": [os.path.realpath(path) for path in files],
+            "upload_source": True,
+            "upload": True,
+        }
+        job = secrets.token_hex(8)
+        log_path = os.path.join(JOBS_DIR, job + ".log")
+        state_path = os.path.join(JOBS_DIR, job + ".json")
+        meta_path = os.path.join(JOBS_DIR, job + ".meta.json")
+        config_path = os.path.join(JOBS_DIR, job + ".config.json")
+        created = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"phase": "queued", "status": "queued", "files": config["files"]}, f, ensure_ascii=False, indent=2)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({"job": job, "kind": "upload", "created": created, **config}, f, ensure_ascii=False, indent=2)
+        lf = open(log_path, "w")
+        proc = subprocess.Popen(
+            [sys.executable, PROCESS_MEDIA, config_path, state_path],
+            env={**os.environ}, stdout=lf, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        jobs[job] = {"proc": proc, "log": log_path, "state": state_path, "meta": meta_path, "cancelled": False}
+        self._send(200, json.dumps({"job": job}))
+
+    def handle_status(self, body):
+        job = body.get("job") or ""
+        j = jobs.get(job)
+        if not j:
+            if len(job) != 16 or any(c not in "0123456789abcdef" for c in job):
+                return self._send(404, json.dumps({"error": "unknown job"}))
+            log_path = os.path.join(JOBS_DIR, job + ".log")
+            if not os.path.isfile(log_path):
+                return self._send(404, json.dumps({"error": "unknown job"}))
+            with open(log_path, errors="replace") as f:
+                text = f.read()[-8000:]
+            cancelled = "CANCELLED BY USER" in text
+            state = {}
+            try:
+                with open(os.path.join(JOBS_DIR, job + ".json"), encoding="utf-8") as f:
+                    state = json.load(f)
+            except (OSError, ValueError):
+                pass
+            return self._send(200, json.dumps({
+                "running": False, "log": text, "cancelled": cancelled,
+                "exit_code": None, "state": state,
+            }))
+        running = j["proc"].poll() is None
+        try:
+            with open(j["log"], errors="replace") as f:
+                text = f.read()[-8000:]
+        except OSError:
+            text = ""
+        state = {}
+        try:
+            with open(j["state"], encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, ValueError):
+            pass
+        self._send(200, json.dumps({
+            "running": running,
+            "log": text,
+            "cancelled": j.get("cancelled", False),
+            "exit_code": j["proc"].poll(),
+            "state": state,
+        }))
+
+    def handle_cancel(self, body):
+        job = body.get("job") or ""
+        j = jobs.get(job)
+        if not j:
+            return self._send(404, json.dumps({"error": "unknown job"}))
+
+        task_ids = []
+        try:
+            with open(j["state"], encoding="utf-8") as f:
+                task_ids = json.load(f).get("task_ids") or []
+        except (OSError, ValueError):
+            pass
+
+        cancel_log = ""
+        if task_ids:
+            result = subprocess.run(
+                [sys.executable, BILI_PULL, "--cancel", *task_ids],
+                env=os.environ,
+                capture_output=True,
+                text=True,
+                timeout=45,
+            )
+            cancel_log = (result.stderr or result.stdout).strip()
+
+        proc = j["proc"]
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        j["cancelled"] = True
+        try:
+            with open(j["state"], encoding="utf-8") as f:
+                cancelled_state = json.load(f)
+        except (OSError, ValueError):
+            cancelled_state = {}
+        cancelled_state.update({"phase": "cancelled", "status": "cancelled"})
+        try:
+            with open(j["state"], "w", encoding="utf-8") as f:
+                json.dump(cancelled_state, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+        with open(j["log"], "a", encoding="utf-8") as f:
+            f.write("\n==> CANCELLED BY USER\n")
+            if cancel_log:
+                f.write(cancel_log + "\n")
+        with open(j["log"], errors="replace") as f:
+            text = f.read()[-8000:]
+        self._send(200, json.dumps({"cancelled": True, "log": text}))
+
+    def handle_health(self, body):
+        del body
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", "bili23.service"],
+                capture_output=True, text=True, timeout=5,
+            )
+            bili23 = (result.stdout or "unknown").strip()
+        except (OSError, subprocess.TimeoutExpired):
+            bili23 = "unknown"
+        usage = shutil.disk_usage(DOWNLOADS_DIR)
+        active = sum(1 for item in jobs.values() if item["proc"].poll() is None)
+        self._send(200, json.dumps({
+            "bili23": bili23,
+            "disk_total": usage.total,
+            "disk_free": usage.free,
+            "active_jobs": active,
+        }))
+
+    def handle_probe(self, body):
+        paths = [str(item) for item in (body.get("paths") or []) if item]
+        if not paths or len(paths) > 10:
+            return self._send(400, json.dumps({"error": "select between 1 and 10 files"}))
+        output = []
+        for supplied in paths:
+            path = os.path.realpath(supplied)
+            if not path.startswith(DOWNLOADS_DIR + os.sep) or not os.path.isfile(path):
+                return self._send(400, json.dumps({"error": f"invalid downloaded file: {supplied}"}))
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", path],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                return self._send(422, json.dumps({"error": (result.stderr or "ffprobe failed").strip()[-800:]}))
+            info = json.loads(result.stdout)
+            streams = info.get("streams") or []
+            fmt = info.get("format") or {}
+            video_stream = next((item for item in streams if item.get("codec_type") == "video"), {})
+            audio_streams = [item for item in streams if item.get("codec_type") == "audio"]
+            subtitles = [item for item in streams if item.get("codec_type") == "subtitle"]
+
+            def number(value):
+                try:
+                    return float(value or 0)
+                except (TypeError, ValueError):
+                    return 0
+
+            def first_packet(selector):
+                packet = subprocess.run(
+                    ["ffprobe", "-v", "error", "-select_streams", selector,
+                     "-read_intervals", "%+#1", "-show_packets", "-show_entries",
+                     "packet=pts_time", "-of", "default=nw=1:nk=1", path],
+                    capture_output=True, text=True, timeout=15,
+                )
+                return number((packet.stdout or "0").splitlines()[0] if packet.stdout else 0)
+
+            side_data = video_stream.get("side_data_list") or []
+            transfer = video_stream.get("color_transfer") or ""
+            output.append({
+                "path": path, "name": os.path.basename(path),
+                "size": int(number(fmt.get("size"))),
+                "duration": number(fmt.get("duration")),
+                "bit_rate": int(number(fmt.get("bit_rate"))),
+                "video": {
+                    "codec": video_stream.get("codec_name"), "profile": video_stream.get("profile"),
+                    "width": video_stream.get("width"), "height": video_stream.get("height"),
+                    "pix_fmt": video_stream.get("pix_fmt"),
+                    "fps": video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate"),
+                    "bit_rate": int(number(video_stream.get("bit_rate"))),
+                    "hdr": transfer in ("smpte2084", "arib-std-b67"),
+                    "dolby_vision": any("dovi" in str(x).lower() or "dolby vision" in str(x).lower() for x in side_data),
+                    "first_packet": first_packet("v:0"),
+                },
+                "audio": [{
+                    "index": index + 1, "codec": stream.get("codec_name"), "profile": stream.get("profile"),
+                    "channels": stream.get("channels"), "layout": stream.get("channel_layout"),
+                    "sample_rate": int(number(stream.get("sample_rate"))),
+                    "bit_rate": int(number(stream.get("bit_rate"))),
+                    "language": (stream.get("tags") or {}).get("language", "und"),
+                    "title": (stream.get("tags") or {}).get("title") or (stream.get("tags") or {}).get("name", ""),
+                    "first_packet": first_packet(f"a:{index}"),
+                } for index, stream in enumerate(audio_streams)],
+                "subtitles": [{
+                    "codec": stream.get("codec_name"),
+                    "language": (stream.get("tags") or {}).get("language", "und"),
+                    "title": (stream.get("tags") or {}).get("title", ""),
+                } for stream in subtitles],
+            })
+        self._send(200, json.dumps(output))
+
+    def handle_jobs(self, body):
+        del body
+        rows = []
+        for name in os.listdir(JOBS_DIR):
+            if not name.endswith(".log"):
+                continue
+            job = name[:-4]
+            log_path = os.path.join(JOBS_DIR, name)
+            meta_path = os.path.join(JOBS_DIR, job + ".meta.json")
+            meta = {}
+            try:
+                with open(meta_path, encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, ValueError):
+                pass
+            current = jobs.get(job)
+            running = bool(current and current["proc"].poll() is None)
+            try:
+                with open(log_path, errors="replace") as f:
+                    tail = f.read()[-4000:]
+                size = os.path.getsize(log_path)
+                modified = os.path.getmtime(log_path)
+            except OSError:
+                continue
+            state = {}
+            try:
+                with open(os.path.join(JOBS_DIR, job + ".json"), encoding="utf-8") as f:
+                    state = json.load(f)
+            except (OSError, ValueError):
+                pass
+            if running:
+                status = "running"
+            elif state.get("status") in ("downloaded", "completed", "failed", "cancelled"):
+                status = state["status"]
+            elif "CANCELLED BY USER" in tail:
+                status = "cancelled"
+            elif "all done" in tail:
+                status = "completed"
+            elif "failed" in tail.lower() or "nothing downloaded" in tail.lower():
+                status = "failed"
+            else:
+                status = "stopped"
+            rows.append({
+                "job": job, "status": status,
+                "url": meta.get("url") or meta.get("source") or meta.get("name", ""),
+                "kind": meta.get("kind", "download"),
+                "created": meta.get("created", time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(modified))),
+                "log_size": size, "modified": modified,
+            })
+        rows.sort(key=lambda row: row["modified"], reverse=True)
+        self._send(200, json.dumps(rows[:30]))
+
+    def handle_retry(self, body):
+        job = body.get("job") or ""
+        if len(job) != 16 or any(c not in "0123456789abcdef" for c in job):
+            return self._send(400, json.dumps({"error": "invalid job"}))
+        meta_path = os.path.join(JOBS_DIR, job + ".meta.json")
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            return self._send(404, json.dumps({"error": "this older job has no retry metadata"}))
+        if meta.get("kind") == "torrent":
+            if meta.get("source"):
+                return self.handle_torrent({"source": meta["source"], "name": meta.get("name", "")})
+            torrent_file = meta.get("torrent_file") or ""
+            if os.path.isfile(torrent_file) and os.path.realpath(torrent_file).startswith(os.path.realpath(JOBS_DIR) + os.sep):
+                with open(torrent_file, "rb") as handle:
+                    encoded = base64.b64encode(handle.read()).decode("ascii")
+                return self.handle_torrent({"torrent_data": encoded, "name": meta.get("name", "")})
+            return self._send(404, json.dumps({"error": "ไม่พบไฟล์ .torrent เดิมสำหรับ retry"}))
+        return self.handle_pull(meta)
+
+    # ---- Files tab ----
+
+    def handle_list_downloads(self, body):
+        out = []
+        for root, _dirs, names in os.walk(DOWNLOADS_DIR):
+            for n in names:
+                p = os.path.join(root, n)
+                if n.endswith(".aria2") or os.path.exists(p + ".aria2"):
+                    continue
+                try:
+                    out.append({"path": p, "relative": os.path.relpath(p, DOWNLOADS_DIR), "size": os.path.getsize(p)})
+                except OSError:
+                    continue
+        out.sort(key=lambda f: f["size"], reverse=True)
+        self._send(200, json.dumps(out))
+
+    def handle_delete_downloads(self, body):
+        paths = body.get("paths") or []
+        deleted = failed = 0
+        for p in paths:
+            # never delete outside the downloads dir, whatever the client sends
+            rp = os.path.realpath(p)
+            if rp != DOWNLOADS_DIR and not rp.startswith(DOWNLOADS_DIR + os.sep):
+                failed += 1
+                continue
+            try:
+                os.remove(rp)
+                deleted += 1
+            except OSError:
+                failed += 1
+        self._send(200, json.dumps({"deleted": deleted, "failed": failed}))
+
+    def handle_list_drive(self, body):
+        r = subprocess.run(
+            ["node", DRIVE_FILES, "list"],
+            env={**os.environ}, capture_output=True, text=True, timeout=90,
+        )
+        if r.returncode != 0:
+            return self._send(502, json.dumps({"error": (r.stderr or "drive list failed").strip()[-800:]}))
+        self._send(200, r.stdout.strip() or "[]")
+
+    def handle_delete_drive(self, body):
+        ids = [str(i) for i in (body.get("ids") or []) if i]
+        if not ids:
+            return self._send(400, json.dumps({"error": "no ids"}))
+        r = subprocess.run(
+            ["node", DRIVE_FILES, "delete", *ids],
+            env={**os.environ}, capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode != 0:
+            return self._send(502, json.dumps({"error": (r.stderr or "drive delete failed").strip()[-800:]}))
+        res = json.loads(r.stdout or "{}")
+        self._send(200, json.dumps({"deleted": len(res.get("deleted", [])), "failed": len(res.get("failed", []))}))
+
+
+def main():
+    if not TOKEN:
+        sys.exit("set BILI_WEB_TOKEN")
+    srv = ThreadingHTTPServer((HOST, PORT), H)
+    print(f"bili-web on {HOST}:{PORT}", flush=True)
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

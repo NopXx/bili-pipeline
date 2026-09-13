@@ -1,0 +1,10 @@
+{
+  "name": "bili-pipeline",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "googleapis": "^144.0.0",
+    "pg": "^8.13.0",
+    "vue": "^3.5.21"
+  }
+}

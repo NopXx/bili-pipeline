@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Secrets & local environment — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# Runtime state / per-job artifacts
+jobs/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Manual backups (git history replaces these)
+*.before-*
+
+# Next.js / build output
+.next/
+
+# Downloaded media & HLS output — never belongs in the repo
+downloads/
+bili-hls/
+*.mkv
+*.mp4
+*.m4v
+*.mov
+*.webm
+*.m4s
+*.ts
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

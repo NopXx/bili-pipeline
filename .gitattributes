@@ -1,0 +1,9 @@
+# This project is deployed on Linux; keep LF so shell scripts never get CRLF.
+* text=auto eol=lf
+*.sh   text eol=lf
+*.py   text eol=lf
+*.mjs  text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
