@@ -202,7 +202,7 @@ case "$video_pixfmt" in *10le | *10be | *12le | *12be | *16le | *16be | p010* | 
 # box, libx264 otherwise. This is the step that takes real time.
 ff_encoders=$(ffmpeg -hide_banner -encoders 2>&1)
 encoder_works() {
-  ffmpeg -hide_banner -loglevel error -f lavfi -i color=size=64x64:rate=1 \
+  ffmpeg -hide_banner -loglevel error -f lavfi -i color=size=640x360:rate=1 \
     -frames:v 1 -c:v "$1" -f null - >/dev/null 2>&1
 }
 if [ "${PREP_PRESERVE_HDR:-0}" = "1" ]; then
