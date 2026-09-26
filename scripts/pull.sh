@@ -24,11 +24,16 @@ fi
 # just so we can fail early if it is missing. Load it as a *fallback* — anything
 # already in the environment (e.g. a per-job BILI_VIDEO_QUALITY from the picker
 # UI) wins, so sourcing the file must not clobber it.
-while IFS='=' read -r k v; do
-  case "$k" in ''|\#*) continue ;; esac
-  [ -z "${!k+x}" ] && export "$k=$v"
-done < "$here/.env.local"
-: "${DRIVE_FOLDER_ID:?set DRIVE_FOLDER_ID in .env.local}"
+env_file="${BILI_ENV_FILE:-$here/.env.local}"
+if [ -f "$env_file" ]; then
+  while IFS='=' read -r k v; do
+    case "$k" in ''|\#*) continue ;; esac
+    [ -z "${!k+x}" ] && export "$k=$v"
+  done < "$env_file"
+fi
+if [ "${BILI_DOWNLOAD_ONLY:-0}" != "1" ] && [ -z "${BILI_RCLONE_REMOTE:-}" ]; then
+  : "${DRIVE_FOLDER_ID:?set DRIVE_FOLDER_ID in .env.local}"
+fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -69,7 +74,11 @@ for src in "${files[@]}"; do
   echo "==> prep-hls ($vcodec): $src" >&2
   bash "$here/public/prep-hls.sh" "$src" "$bundle"
   echo "==> pushing to Drive: $base" >&2
-  node "$here/scripts/drive_push.mjs" "$bundle" "$DRIVE_FOLDER_ID"
+  if [ -n "${BILI_RCLONE_REMOTE:-}" ]; then
+    rclone copy "$bundle" "${BILI_RCLONE_REMOTE%/}/$base"
+  else
+    node "$here/scripts/drive_push.mjs" "$bundle" "$DRIVE_FOLDER_ID"
+  fi
 done
 
 echo "==> all done. Open /admin and Sync to see them." >&2

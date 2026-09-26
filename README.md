@@ -31,3 +31,4 @@ Long-running work runs as jobs with live progress (percent + upload speed), canc
 
 - The server binds loopback only; access it via an SSH tunnel.
 - Secrets live solely in `.env.local` and the Postgres `settings` table — nothing sensitive is committed.
+- For a temporary Kaggle session, set `BILI_DOWNLOADS_DIR` and `BILI_HLS_DIR` to writable directories under `/kaggle/working`. Set `BILI_RCLONE_REMOTE=metube:tube` to upload HLS bundles (and original files) through an existing private rclone config instead of the Node/OAuth uploader. This does not enable the Drive-list/delete API; that API still needs OAuth credentials. Bilibili downloads still require a reachable Bili23 MCP service.

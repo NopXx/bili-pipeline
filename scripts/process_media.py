@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PREP = ROOT / "public" / "prep-hls.sh"
 PUSH = ROOT / "scripts" / "drive_push.mjs"
 DRIVE_UPLOAD = ROOT / "scripts" / "drive_upload.mjs"
+RCLONE_REMOTE = os.environ.get("BILI_RCLONE_REMOTE", "").rstrip("/")
 DOWNLOADS = Path(os.environ.get("BILI_DOWNLOADS_DIR", "/opt/bili-downloads")).resolve()
 HLS_ROOT = Path(os.environ.get("BILI_HLS_DIR", "/opt/bili-hls")).resolve()
 
@@ -159,14 +160,22 @@ def main():
     if config.get("upload_source"):
         update_state(state_path, phase="upload", status="running", progress=0, files=[str(x) for x in files])
         try:
-            folder_id = env.get("DRIVE_FOLDER_ID")
-            if not folder_id:
-                raise RuntimeError("DRIVE_FOLDER_ID is not configured")
             print(f"==> uploading: {len(files)} source file(s) to Drive", flush=True)
-            run_with_progress(
-                ["node", str(DRIVE_UPLOAD), folder_id, *[str(x) for x in files]],
-                env, 0, "UPLOAD", state_path,
-            )
+            if RCLONE_REMOTE:
+                for index, source in enumerate(files, 1):
+                    dest = f"{RCLONE_REMOTE}/{source.stem}/{source.name}"
+                    run_with_progress(["rclone", "copyto", str(source), dest,
+                                       "--stats=5s", "--stats-one-line", "--stats-log-level", "NOTICE"],
+                                      env, 0, "UPLOAD", state_path)
+                    update_state(state_path, progress=int(index * 100 / len(files)))
+            else:
+                folder_id = env.get("DRIVE_FOLDER_ID")
+                if not folder_id:
+                    raise RuntimeError("DRIVE_FOLDER_ID is not configured")
+                run_with_progress(
+                    ["node", str(DRIVE_UPLOAD), folder_id, *[str(x) for x in files]],
+                    env, 0, "UPLOAD", state_path,
+                )
             update_state(state_path, phase="completed", status="completed", progress=100)
             print("==> all selected files uploaded", flush=True)
         except Exception as exc:
@@ -192,12 +201,17 @@ def main():
             update_state(state_path, phase="hls", current_file=str(source), progress=0)
             run_with_progress(["bash", str(PREP), str(source), str(output)], env, total, "HLS", state_path)
             if upload:
-                folder_id = env.get("DRIVE_FOLDER_ID")
-                if not folder_id:
-                    raise RuntimeError("DRIVE_FOLDER_ID is not configured")
                 update_state(state_path, phase="upload", progress=0)
                 print(f"==> uploading: {source.stem}", flush=True)
-                run_with_progress(["node", str(PUSH), str(output), folder_id], env, 0, "UPLOAD", state_path)
+                if RCLONE_REMOTE:
+                    run_with_progress(["rclone", "copy", str(output), f"{RCLONE_REMOTE}/{output.name}",
+                                       "--stats=5s", "--stats-one-line", "--stats-log-level", "NOTICE"],
+                                      env, 0, "UPLOAD", state_path)
+                else:
+                    folder_id = env.get("DRIVE_FOLDER_ID")
+                    if not folder_id:
+                        raise RuntimeError("DRIVE_FOLDER_ID is not configured")
+                    run_with_progress(["node", str(PUSH), str(output), folder_id], env, 0, "UPLOAD", state_path)
             if context:
                 context.cleanup()
         update_state(state_path, phase="completed", status="completed", progress=100)
