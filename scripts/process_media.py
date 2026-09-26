@@ -141,13 +141,26 @@ def run_with_progress(command, env, total, label, state_path):
         if hls_progress:
             percent = min(100, int(float(hls_progress.group(1))))
             now = time.monotonic()
+            eta_seconds = None
+            speed_match = re.search(r"(\d+(?:\.\d+)?)x\s*$", clean)
+            if speed_match:
+                speed_factor = float(speed_match.group(1))
+                if speed_factor > 0:
+                    def seconds(value):
+                        hours, minutes, seconds = value.split(":")
+                        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+                    media_remaining = max(0.0, seconds(hls_progress.group(3)) - seconds(hls_progress.group(2)))
+                    eta_seconds = int(media_remaining / speed_factor + 0.5)
             if now - last_hls_log_at >= 1.0 or percent == 100:
                 # Keep hls-prep's own bar, elapsed time, fps and speed visible
                 # at most once per second, even within the same whole percent.
                 print(clean, flush=True)
                 last_hls_log_at = now
+                update_state(state_path, progress=percent, eta_seconds=eta_seconds)
+            elif percent != last_percent:
+                update_state(state_path, progress=percent, eta_seconds=eta_seconds)
             if percent != last_percent:
-                update_state(state_path, progress=percent)
                 last_percent = percent
             continue
         print(text, flush=True)
@@ -248,10 +261,10 @@ def main():
                 HLS_ROOT.mkdir(parents=True, exist_ok=True)
                 parent = HLS_ROOT
             output = parent / source.stem.rstrip(" .")
-            update_state(state_path, phase="hls", current_file=str(source), progress=0)
+            update_state(state_path, phase="hls", current_file=str(source), progress=0, eta_seconds=None)
             run_with_progress(["bash", str(PREP), str(source), str(output)], env, total, "HLS", state_path)
             if upload:
-                update_state(state_path, phase="upload", progress=0)
+                update_state(state_path, phase="upload", progress=0, eta_seconds=None)
                 print(f"==> uploading: {source.stem}", flush=True)
                 if RCLONE_REMOTE:
                     run_with_progress(["rclone", "copy", str(output), f"{RCLONE_REMOTE}/{output.name}",
