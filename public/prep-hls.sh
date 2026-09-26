@@ -202,8 +202,13 @@ case "$video_pixfmt" in *10le | *10be | *12le | *12be | *16le | *16be | p010* | 
 # box, libx264 otherwise. This is the step that takes real time.
 ff_encoders=$(ffmpeg -hide_banner -encoders 2>&1)
 encoder_works() {
-  ffmpeg -hide_banner -loglevel error -f lavfi -i color=size=640x360:rate=1 \
-    -frames:v 1 -c:v "$1" -f null - >/dev/null 2>&1
+  local diagnostic
+  if diagnostic=$(ffmpeg -hide_banner -loglevel error -f lavfi -i color=size=640x360:rate=1 \
+    -frames:v 1 -c:v "$1" -f null - 2>&1 >/dev/null); then
+    return 0
+  fi
+  printf '  %s probe failed: %s\n' "$1" "$diagnostic" >&2
+  return 1
 }
 if [ "${PREP_PRESERVE_HDR:-0}" = "1" ]; then
   if grep -q hevc_nvenc <<<"$ff_encoders" && encoder_works hevc_nvenc; then venc=hevc_nvenc
