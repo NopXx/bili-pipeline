@@ -435,6 +435,7 @@ class H(BaseHTTPRequestHandler):
         "/api/parse": "handle_parse",
         "/api/pull": "handle_pull",
         "/api/torrent": "handle_torrent",
+        "/api/torrent/inspect": "handle_torrent_inspect",
         "/api/status": "handle_status",
         "/api/cancel": "handle_cancel",
         "/api/health": "handle_health",
@@ -522,7 +523,33 @@ class H(BaseHTTPRequestHandler):
         }
         self._send(200, json.dumps({"job": job}))
 
+    def handle_torrent_inspect(self, body):
+        return self.handle_torrent({**body, "inspect": True})
+
     def handle_torrent(self, body):
+        inspecting = body.get("inspect") is True
+        selected = body.get("selected_files")
+        inspection_job = str(body.get("inspection_job") or "")
+        if inspection_job:
+            if not re.fullmatch(r"[a-f0-9]{16}", inspection_job):
+                return self._send(400, json.dumps({"error": "invalid inspection job"}))
+            with open(os.path.join(JOBS_DIR, inspection_job + ".json"), encoding="utf-8") as handle:
+                listing = json.load(handle)
+            valid = {entry["index"] for entry in listing.get("torrent_files", [])}
+            if listing.get("phase") != "ready" or not isinstance(selected, list) or not selected or any(type(n) is not int or n not in valid for n in selected):
+                return self._send(400, json.dumps({"error": "เลือกไฟล์อย่างน้อยหนึ่งไฟล์จากรายการ torrent"}))
+            with open(os.path.join(JOBS_DIR, inspection_job + ".json.prepared.torrent"), "rb") as handle:
+                body = {**body, "source": "", "torrent_data": base64.b64encode(handle.read()).decode("ascii")}
+        elif selected is not None:
+            # Retry uses the stored torrent, but still validates file indices.
+            from torrent_download import torrent_files
+            try:
+                _, entries = torrent_files(base64.b64decode(body.get("torrent_data", ""), validate=True))
+                valid = {entry["index"] for entry in entries}
+                if not isinstance(selected, list) or not selected or any(type(n) is not int or n not in valid for n in selected):
+                    raise ValueError("invalid file selection")
+            except Exception:
+                return self._send(400, json.dumps({"error": "invalid torrent file selection"}))
         source = str(body.get("source") or "").strip()
         encoded = str(body.get("torrent_data") or "").strip()
         supplied_name = str(body.get("name") or "").strip()
@@ -568,18 +595,23 @@ class H(BaseHTTPRequestHandler):
         state_path = os.path.join(JOBS_DIR, job + ".json")
         meta_path = os.path.join(JOBS_DIR, job + ".meta.json")
         created = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        state = {"kind": "torrent", "phase": "queued", "status": "queued", "progress": 0, "destination": destination}
+        state = {"kind": "torrent_inspect" if inspecting else "torrent", "phase": "queued", "status": "queued", "progress": 0, "destination": destination}
         with open(state_path, "w", encoding="utf-8") as handle:
             json.dump(state, handle, ensure_ascii=False, indent=2)
         meta = {
-            "job": job, "kind": "torrent", "created": created, "name": label,
+            "job": job, "kind": "torrent_inspect" if inspecting else "torrent", "created": created, "name": label, "selected_files": selected,
             "source": source, "torrent_file": torrent_path, "destination": destination,
         }
         with open(meta_path, "w", encoding="utf-8") as handle:
             json.dump(meta, handle, ensure_ascii=False, indent=2)
         lf = open(log_path, "w")
+        command = [sys.executable, TORRENT_DOWNLOAD, source_arg, destination, state_path]
+        if inspecting:
+            command.insert(2, "--inspect")
+        elif selected:
+            command.append(",".join(map(str, sorted(set(selected)))))
         proc = subprocess.Popen(
-            [sys.executable, TORRENT_DOWNLOAD, source_arg, destination, state_path],
+            command,
             env={**os.environ}, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True,
         )
         jobs[job] = {"proc": proc, "log": log_path, "state": state_path, "meta": meta_path, "cancelled": False}
@@ -914,7 +946,10 @@ class H(BaseHTTPRequestHandler):
             if os.path.isfile(torrent_file) and os.path.realpath(torrent_file).startswith(os.path.realpath(JOBS_DIR) + os.sep):
                 with open(torrent_file, "rb") as handle:
                     encoded = base64.b64encode(handle.read()).decode("ascii")
-                return self.handle_torrent({"torrent_data": encoded, "name": meta.get("name", "")})
+                retry_body = {"torrent_data": encoded, "name": meta.get("name", "")}
+                if meta.get("selected_files"):
+                    retry_body["selected_files"] = meta["selected_files"]
+                return self.handle_torrent(retry_body)
             return self._send(404, json.dumps({"error": "ไม่พบไฟล์ .torrent เดิมสำหรับ retry"}))
         return self.handle_pull(meta)
 
