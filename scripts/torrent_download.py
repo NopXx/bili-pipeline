@@ -128,10 +128,14 @@ def emit(line, state_path, base_state, log_state):
         )
         if eta:
             status += f" | ETA {eta.group(1)}"
-        # aria2 emits the same percentage (and FILE path) every few seconds.
-        # Keep the web log readable while its progress bar tracks each change.
-        if pct != log_state["progress"]:
+        # Show fresh speed/peer/ETA readings once per second even when the
+        # whole-number percentage has not changed. FILE lines stay deduped.
+        now = time.monotonic()
+        should_log = now - log_state["last_log_at"] >= 1.0 or (pct == 100 and log_state["progress"] != 100)
+        if should_log:
             print(status, flush=True)
+            log_state["last_log_at"] = now
+        if pct != log_state["progress"] or should_log:
             write_state(state_path, {**base_state, "phase": "torrent", "status": "downloading", "progress": pct})
             log_state["progress"] = pct
     elif line.startswith("FILE:"):
@@ -193,7 +197,7 @@ def main():
         bufsize=1,
     )
     pending = ""
-    log_state = {"progress": None, "files": set()}
+    log_state = {"progress": None, "files": set(), "last_log_at": 0.0}
     assert process.stdout is not None
     while True:
         # aria2 refreshes its console line with CR rather than LF. Reading one
