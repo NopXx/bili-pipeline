@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 PREP = ROOT / "public" / "prep-hls.sh"
@@ -83,6 +84,7 @@ def run_with_progress(command, env, total, label, state_path):
         text=True, errors="replace", bufsize=1,
     )
     last_percent = -1
+    last_hls_log_at = 0.0
     upload_total = 0
     upload_done = 0
     assert proc.stdout is not None
@@ -138,11 +140,13 @@ def run_with_progress(command, env, total, label, state_path):
             )
         if hls_progress:
             percent = min(100, int(float(hls_progress.group(1))))
+            now = time.monotonic()
+            if now - last_hls_log_at >= 1.0 or percent == 100:
+                # Keep hls-prep's own bar, elapsed time, fps and speed visible
+                # at most once per second, even within the same whole percent.
+                print(clean, flush=True)
+                last_hls_log_at = now
             if percent != last_percent:
-                print(
-                    f"HLS | {percent}% | {hls_progress.group(2)} / {hls_progress.group(3)}",
-                    flush=True,
-                )
                 update_state(state_path, progress=percent)
                 last_percent = percent
             continue
