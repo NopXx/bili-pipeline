@@ -100,6 +100,52 @@ def run_with_progress(command, env, total, label, state_path):
             update_state(state_path, progress=percent)
             last_percent = percent
             continue
+        # rclone --stats-one-line prints e.g.
+        # `208.382 MiB / 8.501 GiB, 2%, 32.095 MiB/s, ETA 4m24s`.
+        # Its NOTICE prefix varies by version, so match the transfer summary.
+        rclone_progress = None
+        if label == "UPLOAD":
+            rclone_progress = re.search(
+                r"([\d.]+\s+[kMGTPE]?i?B)\s*/\s*"
+                r"([\d.]+\s+[kMGTPE]?i?B),\s*"
+                r"(\d{1,3})%,\s*"
+                r"([\d.]+\s+[kMGTPE]?i?B/s)",
+                text,
+            )
+        if rclone_progress:
+            percent = min(100, int(rclone_progress.group(3)))
+            if percent != last_percent:
+                print(
+                    f"UPLOAD | {percent}% | {rclone_progress.group(4)} "
+                    f"· {rclone_progress.group(1)} / {rclone_progress.group(2)}",
+                    flush=True,
+                )
+                update_state(state_path, progress=percent)
+                last_percent = percent
+            continue
+        # hls-prep reports `[bar] 12.34% 00:14:54 / 02:00:51 300 fps 12x`.
+        # It does not emit ffmpeg's `time=`, and its terminal bar can include
+        # control/ANSI sequences. Keep only compact, whole-percent milestones
+        # in the job log while mirroring the value to the state file.
+        hls_progress = None
+        if label == "HLS":
+            clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+            hls_progress = re.search(
+                r"(?<!\d)(\d{1,3}(?:\.\d+)?)%\s+"
+                r"(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)\s*/\s*"
+                r"(\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)",
+                clean,
+            )
+        if hls_progress:
+            percent = min(100, int(float(hls_progress.group(1))))
+            if percent != last_percent:
+                print(
+                    f"HLS | {percent}% | {hls_progress.group(2)} / {hls_progress.group(3)}",
+                    flush=True,
+                )
+                update_state(state_path, progress=percent)
+                last_percent = percent
+            continue
         print(text, flush=True)
         percent = None
         # Upload with no byte stream falls back to a count: drive_push announces

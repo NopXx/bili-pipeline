@@ -111,7 +111,7 @@ def downloaded_files(root):
     return sorted(output)
 
 
-def emit(line, state_path, base_state):
+def emit(line, state_path, base_state, log_state):
     line = ANSI.sub("", line).strip()
     if not line:
         return
@@ -128,9 +128,17 @@ def emit(line, state_path, base_state):
         )
         if eta:
             status += f" | ETA {eta.group(1)}"
-        print(status, flush=True)
-        write_state(state_path, {**base_state, "phase": "torrent", "status": "downloading", "progress": pct})
-    elif any(token in line for token in ("NOTICE", "ERROR", "WARN", "Download Results", "FILE:")):
+        # aria2 emits the same percentage (and FILE path) every few seconds.
+        # Keep the web log readable while its progress bar tracks each change.
+        if pct != log_state["progress"]:
+            print(status, flush=True)
+            write_state(state_path, {**base_state, "phase": "torrent", "status": "downloading", "progress": pct})
+            log_state["progress"] = pct
+    elif line.startswith("FILE:"):
+        if line not in log_state["files"]:
+            print(line, flush=True)
+            log_state["files"].add(line)
+    elif any(token in line for token in ("NOTICE", "ERROR", "WARN", "Download Results")):
         print(line, flush=True)
 
 
@@ -185,6 +193,7 @@ def main():
         bufsize=1,
     )
     pending = ""
+    log_state = {"progress": None, "files": set()}
     assert process.stdout is not None
     while True:
         # aria2 refreshes its console line with CR rather than LF. Reading one
@@ -196,8 +205,8 @@ def main():
         parts = re.split(r"[\r\n]+", pending)
         pending = parts.pop()
         for line in parts:
-            emit(line, state_path, base_state)
-    emit(pending, state_path, base_state)
+            emit(line, state_path, base_state, log_state)
+    emit(pending, state_path, base_state, log_state)
     code = process.wait()
     files = downloaded_files(destination)
     if allowed_paths is not None:
