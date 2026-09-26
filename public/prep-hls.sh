@@ -235,13 +235,27 @@ ff_filters=$(ffmpeg -hide_banner -filters 2>&1)
 
 # A ladder re-encodes two or three rungs at once, which otherwise pins the CPU
 # on decoding the 4K source and rescaling it once per rung. On NVENC we keep an
-# SDR/deep ladder wholly on the GPU: NVDEC decodes, scale_cuda resizes (and
-# drops 10-bit to the 8-bit a browser needs) in one pass, NVENC encodes — the
-# CPU never touches a frame. A build without scale_cuda falls back to the CPU.
+# SDR ladder video on the GPU: NVDEC decodes, scale_cuda resizes, NVENC encodes.
+# Older FFmpeg builds expose scale_cuda but not its format option. For an
+# already-yuv420p source, no pixel-format conversion is needed; other formats
+# fall back to software scaling while NVENC still handles video encoding.
+scale_cuda_format_supported=0
+if grep -q scale_cuda <<<"$ff_filters" &&
+  ffmpeg -hide_banner -h filter=scale_cuda 2>&1 | grep -Eq '^[[:space:]]+format[[:space:]]'; then
+  scale_cuda_format_supported=1
+fi
 gpu_ladder=0
+scale_cuda_format_arg=''
 if [ -n "${PREP_LADDER:-}" ] && [ "$venc" = "h264_nvenc" ] && [ "$is_hdr" = "0" ] &&
   grep -q scale_cuda <<<"$ff_filters"; then
-  gpu_ladder=1
+  if [ "$video_pixfmt" = "yuv420p" ]; then
+    gpu_ladder=1
+  elif [ "$scale_cuda_format_supported" = "1" ]; then
+    gpu_ladder=1
+    scale_cuda_format_arg=':format=yuv420p'
+  else
+    echo "  scale_cuda lacks format conversion for $video_pixfmt; using CPU scale + NVENC encode" >&2
+  fi
 fi
 
 # An HDR ladder is the slow one: tonemapping is the cost, and the CPU chain runs
@@ -251,7 +265,8 @@ fi
 # per-rung path, so this wants every rung encoded.
 gpu_hdr_ladder=0
 if [ -n "${PREP_LADDER:-}" ] && [ "$is_hdr" = "1" ] && [ "${PREP_GPU_TONEMAP:-0}" = "1" ] &&
-  [ "$venc" = "h264_nvenc" ] && [ "$copy_video" != "1" ] && grep -q libplacebo <<<"$ff_filters"; then
+  [ "$venc" = "h264_nvenc" ] && [ "$copy_video" != "1" ] &&
+  [ "$scale_cuda_format_supported" = "1" ] && grep -q libplacebo <<<"$ff_filters"; then
   gpu_hdr_ladder=1
 fi
 
@@ -297,11 +312,10 @@ add_encoded_video() {
   local i=$1 h=$2 br=$3 vf th
   video_maps+=(-map 0:v:0)
   if [ "$gpu_ladder" = "1" ]; then
-    # scale_cuda resizes and lands on 8-bit yuv420p in a single GPU pass; -2
-    # keeps the aspect and an even width. A source-height top rung still runs
-    # through it — a cheap no-op resize that also does any 10-bit->8-bit drop.
+    # -2 keeps the aspect and an even width. A yuv420p input needs no format
+    # option; other supported inputs explicitly request yuv420p conversion.
     th=${h:-$video_height}
-    video_args+=(-filter:v:"$i" "scale_cuda=-2:${th}:format=yuv420p")
+    video_args+=(-filter:v:"$i" "scale_cuda=-2:${th}${scale_cuda_format_arg}")
   else
     vf="$base_vf"
     [ -n "$h" ] && vf="${vf:+$vf,}scale=-2:$h"
@@ -356,7 +370,7 @@ fi
 
 if [ "$gpu_ladder" = "1" ]; then
   input_args=(-hwaccel cuda -hwaccel_output_format cuda)
-  echo "  ladder: NVDEC decode + scale_cuda on the GPU (the CPU stays free)"
+  echo "  ladder: NVDEC decode + scale_cuda on the GPU"
 fi
 
 # The ladder request splits into an optional 'raw' rung — the source stream
