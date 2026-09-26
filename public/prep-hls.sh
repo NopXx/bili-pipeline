@@ -180,8 +180,8 @@ fi
 # under -strict unofficial; without it Apple sees the HDR10 base and misses the
 # DV. A re-encoded (tonemapped) rung drops DV either way, so it only matters when
 # the source stream is copied.
-dovi_probe=$(ffprobe -v error -select_streams v:0 \
-  -show_entries stream_side_data=side_data_type,dv_profile,dv_level -of default=nw=1 "$input" |
+dovi_probe=$({ ffprobe -v error -select_streams v:0 \
+  -show_entries stream_side_data=side_data_type,dv_profile,dv_level -of default=nw=1 "$input" 2>/dev/null || true; } |
   awk -F= '
     /^side_data_type=/ { active = (tolower($2) ~ /dovi|dolby vision/); if (active) found=1; profile=""; level="" }
     active && /^dv_profile=/ { profile=$2 }
@@ -210,9 +210,19 @@ if [ "${PREP_PRESERVE_HDR:-0}" = "1" ]; then
   elif grep -q libx265 <<<"$ff_encoders"; then venc=libx265
   else echo 'No HEVC encoder found (need hevc_nvenc or libx265)' >&2; exit 1
   fi
-elif grep -q h264_videotoolbox <<<"$ff_encoders"; then venc=h264_videotoolbox
 elif grep -q h264_nvenc <<<"$ff_encoders" && encoder_works h264_nvenc; then venc=h264_nvenc
+elif grep -q h264_videotoolbox <<<"$ff_encoders" && encoder_works h264_videotoolbox; then venc=h264_videotoolbox
 else venc=libx264
+fi
+if [ "${PREP_REQUIRE_NVENC:-0}" = "1" ] && [ "$copy_video" != "1" ] &&
+  [ "$venc" != "h264_nvenc" ] && [ "$venc" != "hevc_nvenc" ]; then
+  echo "GPU encoding requested, but NVENC could not encode a test frame. Check Kaggle GPU and ffmpeg/NVIDIA driver compatibility." >&2
+  exit 1
+fi
+if [ "$copy_video" = "1" ] && [ -z "${PREP_LADDER:-}" ]; then
+  echo "  video mode: stream copy (no GPU video encoding)"
+else
+  echo "  video encoder: $venc"
 fi
 
 # ffmpeg's filter list, read once — the GPU paths below probe it.
