@@ -108,7 +108,6 @@ createApp({
       return this.logHideProgress ? this.logLines.filter(line => line.kind !== 'progress') : this.logLines
     },
     logHiddenCount() { return this.logLines.length - this.logFiltered.length },
-    logVisible() { return this.logFiltered.length > MAX_RENDERED ? this.logFiltered.slice(-MAX_RENDERED) : this.logFiltered },
   },
   watch: {
     view(value) { if (value === 'files') this.loadFiles() },
@@ -446,4 +445,4 @@ createApp({
     window.addEventListener('keydown', this.onKey)
   },
   beforeUnmount() { clearInterval(this.timer); window.removeEventListener('keydown', this.onKey) },
-}).mount('#transfer-app')
+}).component('bili-account', BiliAccount).mount('#transfer-app')

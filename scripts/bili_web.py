@@ -31,6 +31,7 @@ import time
 from urllib.parse import parse_qs, unquote, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from job_queue import JobQueue
+import bili_auth
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PULL = os.path.join(HERE, "scripts", "pull.sh")
@@ -483,6 +484,11 @@ class H(BaseHTTPRequestHandler):
 
     ROUTES = {
         "/api/parse": "handle_parse",
+        "/api/bili/login/status": "handle_bili_login_status",
+        "/api/bili/login/start": "handle_bili_login_start",
+        "/api/bili/login/poll": "handle_bili_login_poll",
+        "/api/bili/logout": "handle_bili_logout",
+        "/api/bili/restart": "handle_bili_restart",
         "/api/pull": "handle_pull",
         "/api/torrent": "handle_torrent",
         "/api/torrent/inspect": "handle_torrent_inspect",
@@ -514,6 +520,30 @@ class H(BaseHTTPRequestHandler):
             getattr(self, handler)(self._json_body())
         except Exception as e:  # noqa: BLE001 — surface any error as JSON to the UI
             self._send(500, json.dumps({"error": str(e)}))
+
+    def handle_bili_login_status(self, body):
+        del body
+        self._send(200, json.dumps(bili_auth.status()))
+
+    def handle_bili_login_start(self, body):
+        del body
+        self._send(200, json.dumps(bili_auth.start()))
+
+    def handle_bili_login_poll(self, body):
+        self._send(200, json.dumps(bili_auth.poll(str(body.get("key") or ""))))
+
+    def handle_bili_logout(self, body):
+        del body
+        bili_auth.logout()
+        self._send(200, json.dumps({"ok": True}))
+
+    def handle_bili_restart(self, body):
+        del body
+        # Restarting Bili23 drops its in-flight downloads.
+        if any(item["status"] in ("running", "paused") and PULL in item["command"] for item in jobs.values()):
+            return self._send(409, json.dumps({"error": "มีงานดาวน์โหลด Bilibili กำลังทำอยู่ รอให้เสร็จก่อนรีสตาร์ต Bili23"}))
+        bili_auth.restart_bili23()
+        self._send(200, json.dumps({"ok": True}))
 
     def handle_parse(self, body):
         url = (body.get("url") or "").strip()

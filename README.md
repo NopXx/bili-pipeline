@@ -34,6 +34,7 @@ On a host with two visible NVIDIA GPUs, two HLS conversions run at once, one per
 ## Notes
 
 - The server binds loopback only; access it via an SSH tunnel.
+- Bilibili login: the Bilibili download form shows the account status and a **QR-code login** (`scripts/bili_auth.py`, same web QR flow as `bili_login.py`). Scanning with the Bilibili app writes the session cookies into Bili23's `config.json`; cookies are never sent to the browser. Bili23 reads that file at start-up, so restart it after logging in — the UI offers a restart button, which runs `systemctl restart bili23.service` (override with `BILI23_RESTART_CMD`) and refuses while a Bilibili download is active.
 - Set `BILI_TRANSFER_ONLY=1` to serve the download/upload-only web UI and reject HLS conversion requests. No GPU is needed. Upload is manual from the Files tab.
 - Secrets live solely in `.env.local` and the Postgres `settings` table — nothing sensitive is committed.
 - Pause/resume works for queued and running downloads/uploads. Running torrent and rclone workers are suspended as a process group; Bilibili jobs also ask Bili23's MCP server to pause/resume each task. Bilibili tasks cannot be paused before Bili23 has returned task IDs.

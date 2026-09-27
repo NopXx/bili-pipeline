@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bili Studio · Download / Upload</title>
   <link rel="stylesheet" href="/assets/transfer.css">
+  <link rel="stylesheet" href="/assets/bili-login.css">
 </head>
 <body>
   <div id="transfer-app" v-cloak>
@@ -88,6 +89,7 @@
         </div>
 
         <div v-if="source === 'bili'" class="form">
+          <bili-account :api="api" @notify="notify"></bili-account>
           <label class="field">
             <span>Bilibili URL</span>
             <input v-model="biliUrl" placeholder="https://www.bilibili.com/video/BV…" @keyup.enter="parseBili">
@@ -221,6 +223,8 @@
     </div>
   </div>
   <script src="/assets/vue.global.prod.js"></script>
+  <script src="/assets/qrcode.js"></script>
+  <script src="/assets/bili-login.js"></script>
   <script src="/assets/transfer.js"></script>
 </body>
 </html>

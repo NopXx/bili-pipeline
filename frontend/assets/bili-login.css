@@ -1,0 +1,27 @@
+/* Bilibili account box + QR login dialog (bili-login.js), shared by both pages. */
+.bl-account{border:1px solid var(--line,#283141);border-left:3px solid #5d6a7e;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;background:#ffffff06;margin-bottom:12px}
+.bl-account.ok{border-left-color:var(--green,#34d399)}
+.bl-account.warn{border-left-color:var(--amber,#fbbf24)}
+.bl-account.bad{border-left-color:var(--red,#f87171)}
+.bl-account.ok .bl-line b{color:var(--green,#34d399)}
+.bl-line{display:flex;align-items:center;gap:8px;overflow-wrap:anywhere}
+.bl-hint{margin:0;font-size:12.5px;color:var(--muted,#8d9aae)}
+.bl-hint.warn{color:var(--amber,#fbbf24)}
+.bl-actions{display:flex;gap:6px;flex-wrap:wrap}
+.bl-account button,.bl-dialog button{padding:5px 11px;font-size:13px;border-radius:8px}
+.bl-dialog button.ghost,.bl-account button.ghost{background:transparent;border:1px solid var(--line,#283141);color:inherit}
+.bl-spinner{width:14px;height:14px;border:2px solid #8d9aae44;border-top-color:#8d9aae;border-radius:50%;animation:bl-spin .8s linear infinite;flex:none}
+@keyframes bl-spin{to{transform:rotate(360deg)}}
+.bl-scrim{position:fixed;inset:0;background:#0008;z-index:40}
+.bl-dialog{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:41;width:min(360px,calc(100vw - 32px));background:#11161f;color:#e8edf4;border:1px solid var(--line,#283141);border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:12px;box-shadow:0 30px 80px #000a}
+.bl-dialog h2{margin:0;font-size:16px}
+.bl-qr{position:relative;align-self:center;width:232px;height:232px;background:#fff;border-radius:10px;display:grid;place-items:center;overflow:hidden}
+.bl-qr > div:first-child{width:100%;height:100%}
+.bl-qr svg{display:block;width:100%;height:100%}
+.bl-qr.faded svg{opacity:.12}
+.bl-overlay{position:absolute;inset:0;display:grid;place-items:center;font-weight:800;color:#0a0d13;font-size:17px}
+.bl-overlay.ok{color:#059669}
+.bl-status{margin:0;text-align:center;font-weight:600}
+.bl-status.scanned,.bl-status.success{color:var(--green,#34d399)}
+.bl-status.expired,.bl-status.error{color:var(--red,#f87171)}
+.bl-steps{margin:0;padding-left:20px;font-size:13px;color:var(--muted,#8d9aae)}
