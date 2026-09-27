@@ -63,6 +63,10 @@
 #   PREP_AUDIO_CHANNELS   In transcode mode: '2' (default), '2,6' for stereo+5.1,
 #                          add 'raw' to copy; 'stereo+raw' skips encoding for
 #                          stereo-only sources. Ignored in browser-copy mode.
+#   PREP_DTS_POLICY       'transcode' (default): DTS is decoded into the stereo/5.1
+#                          AAC renditions like any other codec, so a browser can
+#                          play it. 'copy': never transcode DTS; keep it only as
+#                          an untouched original (few browsers can play that)
 #   PREP_VIDEO_BITRATE     re-encode target, default 8M
 #   PREP_AUDIO_BITRATE     re-encode target, default 192k (per-layout otherwise)
 #   PREP_SEGMENT_SECONDS   default 6
@@ -118,19 +122,20 @@ mkdir -p "$outdir"
 # and python is one more thing to have installed on a Windows box.
 list_streams() {
   ffprobe -v error -select_streams "$1" \
-    -show_entries stream=index,codec_name,channels,bit_rate:stream_tags=language,title \
+    -show_entries stream=index,codec_name,channels,bit_rate:stream_tags=language,title:stream_disposition=default \
     -of default=nw=1 "$input" |
     awk -F= '
       BEGIN { sep = sprintf("%c", 28) }
-      /^index=/ { if (n++) print line; line = "" ; codec = ""; channels = "2"; bitrate = ""; lang = "und"; title = "" }
+      /^index=/ { if (n++) print line; line = "" ; codec = ""; channels = "2"; bitrate = ""; lang = "und"; title = ""; dflt = "0" }
       /^codec_name=/ { codec = $2 }
       /^channels=/ { channels = $2 }
       /^bit_rate=/ { bitrate = $2 }
       /^TAG:language=/ { lang = $2 }
       /^TAG:title=/ { title = substr($0, index($0, "=") + 1) }
+      /^DISPOSITION:default=/ { dflt = $2 }
       # A tab is shell whitespace, so `read` collapses an empty title and shifts
       # bit_rate into its field. A non-whitespace separator preserves empties.
-      { line = codec sep channels sep lang sep title sep bitrate }
+      { line = codec sep channels sep lang sep title sep bitrate sep dflt }
       END { if (n) print line }
     '
 }
@@ -947,11 +952,13 @@ if [ -n "${PREP_LADDER:-}" ] && [ "$want_raw" = "1" ] && [ "$want_hdr" = "0" ] &
 fi
 
 # Pull the audio streams into arrays: each layout below walks them again.
-a_codec=(); a_channels=(); a_lang=(); a_title=(); a_bitrate=()
-while IFS=$'\034' read -r codec channels language title bitrate; do
+a_codec=(); a_channels=(); a_lang=(); a_title=(); a_bitrate=(); lead_audio=
+while IFS=$'\034' read -r codec channels language title bitrate dflt; do
   [ -n "$codec" ] || continue
   a_codec+=("$codec"); a_channels+=("$channels"); a_lang+=("$language")
   a_title+=("${title:-$language}"); a_bitrate+=("$bitrate")
+  # The source's own default track leads every rendition group it is in.
+  [ -z "$lead_audio" ] && [ "$dflt" = "1" ] && lead_audio=$((${#a_codec[@]} - 1))
 done <<< "$audio"
 
 # A file-name-safe label per audio stream. Two tracks in the same language (an
@@ -1014,6 +1021,8 @@ channel_bitrate() {
 # browser-copy is the low-CPU path for web playback: codecs the target player can
 # consume are copied bit-for-bit and unsupported home-theater codecs are omitted.
 audio_mode=$(echo "${PREP_AUDIO_POLICY:-transcode}" | tr 'A-Z ' 'a-z')
+dts_policy=$(echo "${PREP_DTS_POLICY:-transcode}" | tr 'A-Z ' 'a-z')
+case "$dts_policy" in transcode|copy) ;; *) echo "PREP_DTS_POLICY must be 'transcode' or 'copy', got '$dts_policy'" >&2; exit 1 ;; esac
 case "$audio_mode" in
   transcode|browser-copy) ;;
   *) echo "PREP_AUDIO_POLICY must be 'transcode' or 'browser-copy', got '$audio_mode'" >&2; exit 1 ;;
@@ -1055,10 +1064,11 @@ else
   if [ "${PREP_COPY_AUDIO:-0}" = "1" ] && [[ " ${channel_list[*]} " != *" raw "* ]]; then
     if [ "$channels_set" = "1" ]; then channel_list+=(raw); else channel_list=(raw); fi
   fi
-  # DTS is kept only as a bitstream copy, never transcoded into AAC. Ensure
-  # the raw rendition exists even when the UI asks for stereo/5.1 only.
+  # With PREP_DTS_POLICY=copy, DTS is kept only as a bitstream copy, never
+  # transcoded into AAC: make sure the raw rendition exists even when only
+  # stereo/5.1 was asked for. The default transcodes DTS like any codec.
   for codec in "${a_codec[@]}"; do
-    if [ "$codec" = dts ] && [[ " ${channel_list[*]} " != *" raw "* ]]; then
+    if [ "$dts_policy" = copy ] && [ "$codec" = dts ] && [[ " ${channel_list[*]} " != *" raw "* ]]; then
       channel_list+=(raw)
       echo "audio policy: DTS detected — adding untouched original rendition"
       break
@@ -1117,7 +1127,7 @@ for spec in "${channel_list[@]}"; do
 
   for i in "${!a_codec[@]}"; do
     codec=${a_codec[$i]}; channels=${a_channels[$i]}; language=${a_lang[$i]}; title=${a_title[$i]}
-    if [ "$codec" = dts ] && [ "$spec" != raw ] && [ "$audio_mode" != "browser-copy" ]; then
+    if [ "$dts_policy" = copy ] && [ "$codec" = dts ] && [ "$spec" != raw ] && [ "$audio_mode" != "browser-copy" ]; then
       echo "audio $i: dts ${channels}ch $language — skipping AAC rendition; original will be copied"
       continue
     fi
@@ -1150,7 +1160,7 @@ for spec in "${channel_list[@]}"; do
           name=$(echo "$title" | tr ' ' '-' | tr -cd '[:alnum:]._-')
           [ -n "$name" ] || name=$language
           default=''
-          [ "${gdefault[$gi]}" = "0" ] && { default=,default:yes; gdefault[$gi]=1; }
+          [ "$i" = "${lead_audio:-0}" ] && [ "${gdefault[$gi]}" = "0" ] && { default=,default:yes; gdefault[$gi]=1; }
           map_parts+=("a:$out_index,agroup:$track_group,language:$language,name:$name$default")
           echo "audio $i: $codec ${channels}ch $language — copying for browser playback"
           out_index=$((out_index + 1))
@@ -1201,9 +1211,20 @@ for spec in "${channel_list[@]}"; do
     # single global flag left every group after the first without one, and a
     # player then picks by its own rules rather than the one meant to lead.
     default=''
-    [ "${gdefault[$gi]}" = "0" ] && { default=,default:yes; gdefault[$gi]=1; }
+    [ "$i" = "${lead_audio:-0}" ] && [ "${gdefault[$gi]}" = "0" ] && { default=,default:yes; gdefault[$gi]=1; }
     map_parts+=("a:$out_index,agroup:$track_group,language:$language,name:$name$default")
     out_index=$((out_index + 1))
+  done
+done
+
+# A group without the lead track (a DTS-only original group, say) still needs a
+# DEFAULT, or players pick by their own rules: give it to its first member.
+for gi in "${!groups[@]}"; do
+  [ "${gdefault[$gi]}" = "1" ] && continue
+  for k in "${!map_parts[@]}"; do
+    case "${map_parts[$k]}," in
+      *",agroup:${groups[$gi]},"*) map_parts[$k]="${map_parts[$k]},default:yes"; gdefault[$gi]=1; break ;;
+    esac
   done
 done
 
@@ -1229,7 +1250,7 @@ stream_map="${video_sm}${map_parts[*]}"
 # a <track> element switches them in every browser, and it keeps the master
 # playlist to the one thing HLS is needed for, which is the audio.
 sub_index=0
-while IFS=$'\034' read -r codec channels language title bitrate; do
+while IFS=$'\034' read -r codec channels language title bitrate dflt; do
   [ -n "$codec" ] || continue
   i=$sub_index
   sub_index=$((sub_index + 1))
