@@ -21,6 +21,20 @@ const PROGRESS_LINE = [
   /^\S*\s*\d{1,3}(\.\d+)?%\s+\d{1,2}:\d{2}:\d{2}/,
   /^Transferred:/,
 ]
+// Values Bili23's create_download accepts; "auto" follows Bili23's own
+// priority list. Anything above 1080P (and Hi-Res/Dolby audio) needs a VIP login.
+const BILI_QUALITIES = [
+  ['auto', 'อัตโนมัติ (สูงสุดที่ได้)'], ['8K', '8K'], ['DOLBY_VISION', 'Dolby Vision'], ['HDR', 'HDR'],
+  ['4K_SDR', '4K SDR เพิ่มคุณภาพ'], ['4K', '4K'], ['1080P60', '1080P 60fps'], ['1080P+', '1080P+ บิตเรตสูง'],
+  ['1080P', '1080P'], ['720P', '720P'], ['480P', '480P'], ['360P', '360P'],
+]
+const BILI_CODECS = [['auto', 'อัตโนมัติ'], ['HEVC/H.265', 'HEVC / H.265'], ['AV1', 'AV1'], ['AVC/H.264', 'AVC / H.264 (เล่นได้ทุกที่)']]
+const BILI_AUDIO = [['auto', 'อัตโนมัติ'], ['HI_RES', 'Hi-Res lossless'], ['DOLBY_ATMOS', 'Dolby Atmos'], ['192K', '192 kbps'], ['132K', '132 kbps'], ['64K', '64 kbps']]
+const BILI_DEFAULTS = { quality: 'auto', codec: 'auto', audio_quality: 'auto', container: 'mp4', subtitle: false, redownload: false }
+function savedBiliOptions() {
+  try { return { ...BILI_DEFAULTS, ...JSON.parse(localStorage.getItem('bili-options') || '{}'), redownload: false } } catch { return { ...BILI_DEFAULTS } }
+}
+
 const MAX_LOG_LINES = 40000
 const MAX_RENDERED = 4000
 
@@ -51,7 +65,8 @@ createApp({
     view: 'queue', source: 'torrent', toasts: [],
     driveLink: '', torrentSource: '', torrentData: '', torrentFileName: '', torrentFiles: [], selectedTorrent: [], torrentFilter: '',
     inspectionJob: '', inspectionPending: false,
-    biliUrl: '', episodes: [], selectedEpisodes: [], parsing: false,
+    biliUrl: '', episodes: [], selectedEpisodes: [], parsing: false, biliOptions: savedBiliOptions(),
+    BILI_QUALITIES, BILI_CODECS, BILI_AUDIO,
     files: [], selectedFiles: [], fileSearch: '', fileSort: 'size', filesLoadedAt: 0,
     jobs: [], jobFilter: 'all', laneFilter: 'all', jobSearch: '',
     logJob: '', logLines: [], logStart: 0, logOffset: 0, logSize: 0, logLoading: false, logLoadingOlder: false,
@@ -107,11 +122,19 @@ createApp({
       if (search) return this.logLines.filter(line => line.text.toLowerCase().includes(search))
       return this.logHideProgress ? this.logLines.filter(line => line.kind !== 'progress') : this.logLines
     },
+    biliOptionHint() {
+      const o = this.biliOptions
+      if (['DOLBY_VISION', 'HDR'].includes(o.quality) && o.codec === 'AVC/H.264') return 'HDR และ Dolby Vision ไม่มีใน H.264 ถ้าเลือกแบบนี้ Bili23 จะใช้ codec อื่นแทน'
+      if (o.audio_quality === 'HI_RES' && o.container === 'mp4') return 'เสียง Hi-Res เป็น FLAC ถ้าจะเก็บ FLAC ไว้ครบ ควรเลือกไฟล์ MKV'
+      if (!['auto', '1080P', '720P', '480P', '360P'].includes(o.quality)) return 'คุณภาพสูงกว่า 1080P ต้องล็อกอินบัญชี VIP ถ้าไม่ได้ล็อกอิน Bili23 จะลดคุณภาพลงเอง'
+      return ''
+    },
     logHiddenCount() { return this.logLines.length - this.logFiltered.length },
   },
   watch: {
     view(value) { if (value === 'files') this.loadFiles() },
     torrentSource() { this.resetTorrent() },
+    biliOptions: { deep: true, handler(value) { try { localStorage.setItem('bili-options', JSON.stringify({ ...value, redownload: false })) } catch { /* private mode */ } } },
     logHideProgress() { this.scrollLogIfFollowing() },
     logSearch() { this.scrollLogIfFollowing() },
   },
@@ -167,6 +190,11 @@ createApp({
       seconds = Math.max(0, Math.round(seconds))
       const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = seconds % 60
       return h ? `${h} ชม. ${m} นาที` : m ? `${m} นาที ${s} วิ` : `${s} วิ`
+    },
+    clock(seconds) {
+      seconds = Math.round(+seconds || 0)
+      const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = String(seconds % 60).padStart(2, '0')
+      return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`
     },
     ago(epoch) {
       const seconds = (this.now / 1000) - epoch
@@ -285,7 +313,7 @@ createApp({
     },
     async submitBili() {
       try {
-        this.queued((await this.api('/api/pull', { url: this.biliUrl.trim(), episode_ids: this.selectedEpisodes })).job)
+        this.queued((await this.api('/api/pull', { url: this.biliUrl.trim(), episode_ids: this.selectedEpisodes, ...this.biliOptions })).job)
         this.episodes = []; this.selectedEpisodes = []
       } catch (error) { this.fail(error) }
     },

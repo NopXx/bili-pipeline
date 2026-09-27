@@ -104,11 +104,30 @@
               <label class="row" v-for="episode in episodes" :key="episode.episode_id">
                 <input type="checkbox" :value="episode.episode_id" v-model="selectedEpisodes">
                 <span class="name">{{episode.title}}</span>
+                <span class="size" v-if="episode.duration">{{clock(episode.duration)}}</span>
               </label>
             </div>
+            <div class="options">
+              <label class="field"><span>คุณภาพวิดีโอ</span>
+                <select v-model="biliOptions.quality"><option v-for="q in BILI_QUALITIES" :key="q[0]" :value="q[0]">{{q[1]}}</option></select>
+              </label>
+              <label class="field"><span>Codec</span>
+                <select v-model="biliOptions.codec"><option v-for="c in BILI_CODECS" :key="c[0]" :value="c[0]">{{c[1]}}</option></select>
+              </label>
+              <label class="field"><span>เสียง</span>
+                <select v-model="biliOptions.audio_quality"><option v-for="a in BILI_AUDIO" :key="a[0]" :value="a[0]">{{a[1]}}</option></select>
+              </label>
+              <label class="field"><span>ไฟล์</span>
+                <select v-model="biliOptions.container"><option value="mp4">MP4</option><option value="mkv">MKV</option></select>
+              </label>
+            </div>
+            <div class="option-flags">
+              <label class="check"><input type="checkbox" v-model="biliOptions.subtitle"> ดาวน์โหลดซับไตเติล</label>
+              <label class="check" title="ดาวน์โหลดซ้ำแม้ Bili23 เคยโหลดตอนนี้ไปแล้ว"><input type="checkbox" v-model="biliOptions.redownload"> โหลดซ้ำ</label>
+            </div>
+            <p class="hint" v-if="biliOptionHint">{{biliOptionHint}}</p>
             <button class="wide" @click="submitBili" :disabled="!selectedEpisodes.length">ดาวน์โหลด {{selectedEpisodes.length}} ตอน</button>
           </div>
-          <p class="hint">ต้องมี Bili23 MCP ที่เชื่อมต่อไว้ ถ้า Kaggle ไม่มี Bili23 ให้ใช้ Drive หรือ BitTorrent</p>
         </div>
       </section>
 

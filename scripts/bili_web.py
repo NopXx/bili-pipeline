@@ -53,6 +53,11 @@ LOG_TAIL = 128 * 1024  # first view of a log
 LOG_CHUNK = 512 * 1024  # one incremental or "older lines" read
 LOG_FULL_LIMIT = 32 * 1024 * 1024  # log download
 # Live transfer details a worker mirrors into its state file, passed to the UI.
+# Values Bili23's create_download accepts (v2.20.0 media_info maps).
+BILI_VIDEO_QUALITIES = ("auto", "8K", "DOLBY_VISION", "HDR", "4K_SDR", "4K", "1080P60", "1080P+", "AI", "1080P", "720P", "480P", "360P")
+BILI_VIDEO_CODECS = ("auto", "AVC/H.264", "HEVC/H.265", "AV1")
+BILI_AUDIO_QUALITIES = ("auto", "HI_RES", "DOLBY_ATMOS", "192K", "132K", "64K")
+BILI_CONTAINERS = ("mp4", "mkv")
 JOB_DETAIL_KEYS = ("phase", "error", "exit_code", "speed", "eta", "done", "total", "peers",
                    "downloaded_bytes", "total_bytes", "speed_bytes", "current_file", "file_index", "file_count",
                    "destination")
@@ -573,14 +578,27 @@ class H(BaseHTTPRequestHandler):
             "BILI_JOB_STATE": state_path,
             "BILI_DOWNLOAD_ONLY": "1",
         }
+        choices = {"quality": BILI_VIDEO_QUALITIES, "codec": BILI_VIDEO_CODECS,
+                   "audio_quality": BILI_AUDIO_QUALITIES, "container": BILI_CONTAINERS}
+        for name, allowed in choices.items():
+            value = str(body.get(name) or "").strip()
+            if value and value not in allowed:
+                return self._send(400, json.dumps({"error": f"invalid {name}: {value}"}))
         q = (body.get("quality") or "").strip()
         if q:
             env["BILI_VIDEO_QUALITY"] = q
-        # Always ask for H.264: Bilibili serves an AVC stream at every quality
+        # Default to H.264: Bilibili serves an AVC stream at every quality
         # here, 4K included, so prep-hls copies it instead of re-encoding HEVC.
         # (Trade-off: the AVC 4K stream is SDR, not HDR.) If a quality has no
-        # AVC, Bili23 falls back to the next codec on its own.
-        env["BILI_VIDEO_CODEC"] = "AVC/H.264"
+        # AVC, Bili23 falls back to the next codec on its own. A transfer-only
+        # download is not converted, so it may ask for HEVC/AV1 or "auto".
+        env["BILI_VIDEO_CODEC"] = (body.get("codec") or "").strip() or "AVC/H.264"
+        if a := (body.get("audio_quality") or "").strip():
+            env["BILI_AUDIO_QUALITY"] = a
+        if c := (body.get("container") or "").strip():
+            env["BILI_CONTAINER"] = c
+        if body.get("subtitle"):
+            env["BILI_SUBTITLE"] = "1"
         if body.get("redownload"):
             env["BILI_REDOWNLOAD"] = "1"
         with open(meta_path, "w", encoding="utf-8") as f:
@@ -589,6 +607,10 @@ class H(BaseHTTPRequestHandler):
                 "url": url,
                 "episode_ids": ids,
                 "quality": q or "4K",
+                "codec": env["BILI_VIDEO_CODEC"],
+                "audio_quality": env.get("BILI_AUDIO_QUALITY", ""),
+                "container": env.get("BILI_CONTAINER", "mp4"),
+                "subtitle": bool(body.get("subtitle")),
                 "redownload": bool(body.get("redownload")),
                 "kind": "download",
                 "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
@@ -596,6 +618,7 @@ class H(BaseHTTPRequestHandler):
         overrides = {key: env[key] for key in (
             "BILI_EPISODE_IDS", "BILI_JOB_STATE", "BILI_DOWNLOAD_ONLY",
             "BILI_VIDEO_QUALITY", "BILI_VIDEO_CODEC", "BILI_REDOWNLOAD",
+            "BILI_AUDIO_QUALITY", "BILI_CONTAINER", "BILI_SUBTITLE",
         ) if key in env}
         queue.submit(job, "download", ["bash", PULL, url], overrides)
         self._send(200, json.dumps({"job": job}))

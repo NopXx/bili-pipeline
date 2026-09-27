@@ -63,6 +63,19 @@ class TransferOnlyTests(unittest.TestCase):
                 older = post("/api/log", {"job": job, "before": follow["start"]})
                 self.assertEqual(older["start"], 0)
                 self.assertEqual(older["text"], tail["text"])
+                with self.assertRaises(urllib.error.HTTPError) as bad_option:
+                    post("/api/pull", {"url": "BV1xx411c7mD", "episode_ids": ["1"], "quality": "9K"})
+                self.assertEqual(bad_option.exception.code, 400)
+                pull = post("/api/pull", {"url": "BV1xx411c7mD", "episode_ids": ["1"], "quality": "HDR",
+                                          "codec": "HEVC/H.265", "audio_quality": "HI_RES",
+                                          "container": "mkv", "subtitle": True})["job"]
+                self.assertEqual(web.jobs[pull]["env_overrides"] | {"BILI_JOB_STATE": ""}, {
+                    "BILI_EPISODE_IDS": '["1"]', "BILI_JOB_STATE": "", "BILI_DOWNLOAD_ONLY": "1",
+                    "BILI_VIDEO_QUALITY": "HDR", "BILI_VIDEO_CODEC": "HEVC/H.265",
+                    "BILI_AUDIO_QUALITY": "HI_RES", "BILI_CONTAINER": "mkv", "BILI_SUBTITLE": "1",
+                })
+                plain = post("/api/pull", {"url": "BV1xx411c7mD", "episode_ids": ["1"]})["job"]
+                self.assertEqual(web.jobs[plain]["env_overrides"]["BILI_VIDEO_CODEC"], "AVC/H.264")
                 inspection = post("/api/torrent/inspect", {
                     "torrent_data": base64.b64encode(b"d3:foo3:bare").decode()
                 })["job"]

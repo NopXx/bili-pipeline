@@ -159,6 +159,11 @@ code{font-family:var(--mono);font-size:.92em;background:var(--card2);padding:1px
 .spinner{width:14px;height:14px;border:2px solid #ffffff55;border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
+.options{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.options .field > span{font-size:12px}
+.options select{padding:7px 9px;font-size:13px}
+.option-flags{display:flex;gap:16px;flex-wrap:wrap}
+
 @media (max-width:900px){
   .bar{padding:12px 16px 8px}
   .token{width:100%}

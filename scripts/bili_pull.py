@@ -13,7 +13,8 @@ interface rather than importing anything. See scripts/vps-setup.md.
 Config (port + token) is read from Bili23's own config.json. Override the file
 with BILI_CONFIG, or give the endpoint directly with BILI_MCP_PORT / BILI_MCP_TOKEN.
 Quality knobs (all optional env): BILI_VIDEO_QUALITY, BILI_VIDEO_CODEC,
-BILI_CONTAINER (default mp4), BILI_LIMIT (max episodes, default 500).
+BILI_AUDIO_QUALITY, BILI_CONTAINER (default mp4), BILI_SUBTITLE=1 (also save
+subtitles), BILI_LIMIT (max episodes, default 500).
 """
 import json
 import os
@@ -154,6 +155,10 @@ def build_options():
         opts["video_quality"] = q
     if c := os.environ.get("BILI_VIDEO_CODEC"):
         opts["video_codec"] = c
+    if a := os.environ.get("BILI_AUDIO_QUALITY"):
+        opts["audio_quality"] = a
+    if os.environ.get("BILI_SUBTITLE") == "1":
+        opts["subtitle"] = True
     return opts
 
 
