@@ -2,16 +2,308 @@
 <html lang="th">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bili Studio</title>
-  <link rel="stylesheet" href="/assets/style.css">
+  <link rel="stylesheet" href="/assets/ui.css">
+  <link rel="stylesheet" href="/assets/studio.css">
   <link rel="stylesheet" href="/assets/bili-login.css">
 </head>
 <body>
-  <div id="app"><div class="boot">กำลังเปิด Bili Studio…</div></div>
+  <div id="studio" v-cloak>
+    <header class="bar">
+      <div class="brand">Bili <span>Studio</span></div>
+      <div class="bar-stats" v-if="token">
+        <span class="chip" :class="online && !tokenInvalid ? 'ok' : 'bad'" :title="online ? 'เชื่อมต่อเซิร์ฟเวอร์แล้ว' : lastError"><i class="dot"></i>{{!online ? 'ขาดการเชื่อมต่อ' : tokenInvalid ? 'token ไม่ถูกต้อง' : 'ออนไลน์'}}</span>
+        <template v-if="health">
+          <span class="chip" :class="{warn: health.disk_free < 20 * 1024 ** 3}" :title="`พื้นที่ว่างในโฟลเดอร์ดาวน์โหลด จากทั้งหมด ${size(health.disk_total)}`">ว่าง {{size(health.disk_free)}}</span>
+          <span class="chip" :class="health.convert_gpus?.length ? 'violet' : ''" title="GPU ที่ใช้แปลง HLS">{{gpuLabel}}</span>
+          <span class="chip" v-if="['active', 'inactive', 'failed'].includes(health.bili23)" :class="health.bili23 === 'active' ? 'ok' : 'bad'">Bili23 {{health.bili23}}</span>
+        </template>
+      </div>
+      <form class="token" v-if="!token || editingToken" @submit.prevent="saveToken">
+        <input v-model="tokenDraft" type="password" placeholder="Access token" autocomplete="current-password" aria-label="Access token">
+        <button type="submit">บันทึก</button>
+        <button type="button" class="ghost" v-if="token" @click="editingToken = false">ยกเลิก</button>
+      </form>
+      <button v-else class="ghost small" @click="editToken">เปลี่ยน token</button>
+    </header>
+
+    <div class="empty-state" v-if="!token">
+      <h2>ใส่ Access token เพื่อเริ่มใช้งาน</h2>
+      <p>token เดียวกับที่ตั้งไว้ใน <code>BILI_WEB_TOKEN</code> ตอนเปิดเซิร์ฟเวอร์</p>
+    </div>
+
+    <template v-else>
+      <section class="summary">
+        <button class="stat" @click="setFilter('running')"><b>{{counts.running}}</b><span>กำลังทำงาน</span></button>
+        <button class="stat" @click="setFilter('waiting')"><b>{{counts.waiting}}</b><span>รอคิว / หยุดไว้</span></button>
+        <button class="stat" :class="{on: view === 'queue' && jobFilter === 'done'}" @click="setFilter('done')"><b>{{counts.done}}</b><span>เสร็จแล้ว</span></button>
+        <button class="stat bad" :class="{on: view === 'queue' && jobFilter === 'failed'}" @click="setFilter('failed')"><b>{{counts.failed}}</b><span>ล้มเหลว / ยกเลิก</span></button>
+      </section>
+
+      <nav class="studio-nav">
+        <button v-for="entry in [['queue','คิวงาน'],['add','เพิ่มงาน'],['files','ไฟล์'],['convert','แปลง HLS']]" :key="entry[0]" :class="{on: view === entry[0]}" @click="view = entry[0]">
+          {{entry[1]}}<em v-if="entry[0] === 'queue' && counts.running">{{counts.running}}</em><em v-if="entry[0] === 'convert' && convertFiles.length">{{convertFiles.length}}</em>
+        </button>
+      </nav>
+
+      <main class="studio-main">
+        <!-- ───────────── Queue ───────────── -->
+        <template v-if="view === 'queue'">
+          <div class="lanes">
+            <section class="lane card" v-for="lane in lanes" :key="lane.id">
+              <header class="lane-head">
+                <div><h2>{{lane.name}}</h2><small class="muted">{{lane.hint}}</small></div>
+                <b class="lane-count">{{lane.jobs.length}}</b>
+              </header>
+              <div class="jobs">
+                <job-card v-for="job in lane.jobs" :key="job.job" :job="job" :now="now" :selected="logJob === job.job"
+                  @log="logJob = $event.job" @pause="pause" @resume="resume" @cancel="cancel" @retry="retry"></job-card>
+                <div class="empty small" v-if="!lane.jobs.length">ว่าง</div>
+              </div>
+            </section>
+          </div>
+
+          <section class="card history">
+            <div class="toolbar">
+              <h2 class="grow-title">ประวัติงาน</h2>
+              <div class="segmented small">
+                <button v-for="entry in [['all','ทั้งหมด'],['download','ดาวน์โหลด'],['convert','แปลง'],['upload','อัปโหลด']]" :key="entry[0]" :class="{on: laneFilter === entry[0]}" @click="laneFilter = entry[0]">{{entry[1]}}</button>
+              </div>
+              <input v-model="jobSearch" class="filter grow" placeholder="ค้นหาชื่องาน…">
+              <button class="ghost small" v-if="jobFilter !== 'all'" @click="jobFilter = 'all'">{{filterLabel}} ✕</button>
+            </div>
+            <div class="jobs">
+              <job-card v-for="job in history" :key="job.job" :job="job" :now="now" :selected="logJob === job.job"
+                @log="logJob = $event.job" @pause="pause" @resume="resume" @cancel="cancel" @retry="retry">
+                <button v-if="job.files?.length" class="small" @click="openConverter(job.files)">แปลง HLS</button>
+              </job-card>
+              <div class="empty" v-if="!history.length">{{visible.length ? 'ไม่มีงานที่ตรงกับตัวกรอง' : 'ยังไม่มีงาน เริ่มจากแท็บ “เพิ่มงาน”'}}</div>
+            </div>
+          </section>
+        </template>
+
+        <!-- ───────────── Add ───────────── -->
+        <div v-if="view === 'add'" class="workspace" :class="{single: source !== 'library'}">
+          <section class="card">
+            <h2>เพิ่มงาน</h2>
+            <div class="segmented" role="tablist">
+              <button v-for="mode in [['bili','Bilibili'],['torrent','BitTorrent'],['drive','ลิงก์ Drive'],['library','คลัง Drive']]" :key="mode[0]" role="tab" :aria-selected="source === mode[0]" :class="{on: source === mode[0]}" @click="source = mode[0]">{{mode[1]}}</button>
+            </div>
+
+            <div v-if="source === 'bili'" class="form">
+              <bili-account :key="token" :api="api" @notify="notify"></bili-account>
+              <label class="field"><span>Bilibili URL</span>
+                <input v-model="biliUrl" placeholder="https://www.bilibili.com/video/BV…" @keyup.enter="parseBili">
+              </label>
+              <button class="wide" @click="parseBili" :disabled="!biliUrl.trim() || parsing"><span class="spinner" v-if="parsing"></span>อ่านรายการตอน</button>
+              <div v-if="episodes.length" class="picker">
+                <div class="picker-head">
+                  <label class="check"><input type="checkbox" :checked="selectedEpisodes.length === episodes.length" :indeterminate.prop="selectedEpisodes.length > 0 && selectedEpisodes.length < episodes.length" @change="selectedEpisodes = $event.target.checked ? episodes.filter(e => !e.needs_reparse).map(e => e.episode_id) : []"> เลือกทั้งหมด</label>
+                  <span class="muted">{{selectedEpisodes.length}} / {{episodes.length}} ตอน</span>
+                </div>
+                <div class="picker-list">
+                  <label class="row" v-for="episode in episodes" :key="episode.episode_id" :class="{off: episode.needs_reparse}">
+                    <input type="checkbox" :value="episode.episode_id" v-model="selectedEpisodes" :disabled="episode.needs_reparse">
+                    <span class="name">{{episode.title}}</span>
+                    <span class="size" v-if="episode.duration">{{clock(episode.duration)}}</span>
+                  </label>
+                </div>
+                <div class="options">
+                  <label class="field"><span>คุณภาพวิดีโอ</span><select v-model="biliOptions.quality"><option v-for="q in BILI_QUALITIES" :key="q[0]" :value="q[0]">{{q[1]}}</option></select></label>
+                  <label class="field"><span>Codec</span><select v-model="biliOptions.codec"><option v-for="c in BILI_CODECS" :key="c[0]" :value="c[0]">{{c[1]}}</option></select></label>
+                  <label class="field"><span>เสียง</span><select v-model="biliOptions.audio_quality"><option v-for="a in BILI_AUDIO" :key="a[0]" :value="a[0]">{{a[1]}}</option></select></label>
+                  <label class="field"><span>ไฟล์</span><select v-model="biliOptions.container"><option value="mp4">MP4</option><option value="mkv">MKV</option></select></label>
+                </div>
+                <div class="option-flags">
+                  <label class="check"><input type="checkbox" v-model="biliOptions.subtitle"> ดาวน์โหลดซับไตเติล</label>
+                  <label class="check" title="ดาวน์โหลดซ้ำแม้ Bili23 เคยโหลดตอนนี้ไปแล้ว"><input type="checkbox" v-model="biliOptions.redownload"> โหลดซ้ำ</label>
+                </div>
+                <p class="hint" v-if="biliCodecHint">{{biliCodecHint}}</p>
+                <p class="hint" v-if="biliOptionHint">{{biliOptionHint}}</p>
+                <button class="wide" @click="submitBili" :disabled="!selectedEpisodes.length">ดาวน์โหลด {{selectedEpisodes.length}} ตอน</button>
+              </div>
+            </div>
+
+            <div v-if="source === 'torrent'" class="form">
+              <label class="field"><span>Magnet link หรือ URL ของไฟล์ .torrent</span>
+                <input v-model="torrentSource" placeholder="magnet:?xt=urn:btih:…" :disabled="!!torrentData" @keyup.enter="inspectTorrent">
+              </label>
+              <div class="or">หรือ</div>
+              <label class="drop" :class="{filled: torrentFileName}">
+                <input ref="torrentInput" type="file" accept=".torrent,application/x-bittorrent" @change="chooseTorrent" :disabled="!!torrentSource.trim()">
+                <span v-if="torrentFileName">📄 {{torrentFileName}} <a href="#" @click.prevent="clearTorrentFile">ล้าง</a></span>
+                <span v-else>เลือกไฟล์ .torrent (ไม่เกิน 4 MB)</span>
+              </label>
+              <label class="field"><span>ชื่อโฟลเดอร์ (ไม่บังคับ)</span><input v-model="torrentName" placeholder="ตั้งจากชื่อ torrent อัตโนมัติ"></label>
+              <button class="wide" @click="inspectTorrent" :disabled="inspectionPending || (!torrentSource.trim() && !torrentData)">
+                <span class="spinner" v-if="inspectionPending"></span>{{inspectionPending ? 'กำลังอ่านรายการไฟล์…' : 'อ่านรายการไฟล์'}}
+              </button>
+              <div v-if="torrentFiles.length" class="picker">
+                <div class="picker-head">
+                  <label class="check"><input type="checkbox" :checked="allTorrentSelected" :indeterminate.prop="selectedTorrent.length > 0 && !allTorrentSelected" @change="toggleAllTorrent($event.target.checked)"> เลือกทั้งหมด</label>
+                  <span class="muted">{{selectedTorrent.length}} / {{torrentFiles.length}} ไฟล์ · {{size(selectedTorrentSize)}}</span>
+                </div>
+                <input v-if="torrentFiles.length > 8" v-model="torrentFilter" class="filter" placeholder="ค้นหาไฟล์…">
+                <div class="picker-list">
+                  <label class="row" v-for="file in visibleTorrentFiles" :key="file.index">
+                    <input type="checkbox" :value="file.index" v-model="selectedTorrent">
+                    <span class="name" :title="file.path"><small v-if="dirname(file.path)">{{dirname(file.path)}}/</small>{{basename(file.path)}}</span>
+                    <span class="size">{{size(file.size)}}</span>
+                  </label>
+                </div>
+                <button class="wide" @click="submitTorrent" :disabled="!selectedTorrent.length">ดาวน์โหลด {{selectedTorrent.length}} ไฟล์</button>
+              </div>
+              <p class="hint">ดาวน์โหลดต่อได้ถ้าสะดุด ใช้ DHT/PEX และหยุด seed ทันทีเมื่อโหลดครบ</p>
+            </div>
+
+            <div v-if="source === 'drive'" class="form">
+              <label class="field"><span>ลิงก์ไฟล์ Google Drive หรือ File ID</span>
+                <input v-model="driveLink" placeholder="https://drive.google.com/file/d/…/view" @keyup.enter="submitDrive">
+              </label>
+              <p class="hint">ไฟล์เดี่ยวเท่านั้น (ไม่รองรับโฟลเดอร์และ Google Docs/Sheets/Slides) · ถ้าต้องการเลือกหลายไฟล์จาก Drive ใช้ “คลัง Drive”</p>
+              <button class="wide" @click="submitDrive" :disabled="!driveLink.trim()">เพิ่มเข้าคิวดาวน์โหลด</button>
+            </div>
+
+            <div v-if="source === 'library'" class="form">
+              <div class="crumbs">
+                <template v-for="(crumb, i) in remoteCrumbs" :key="crumb.path">
+                  <span class="muted" v-if="i">/</span>
+                  <button class="ghost small" @click="loadRemote(crumb.path)">{{crumb.name}}</button>
+                </template>
+                <button class="ghost small refresh" @click="loadRemote(remote.path)" :disabled="remote.busy"><span class="spinner dim" v-if="remote.busy"></span>รีเฟรช</button>
+              </div>
+              <div class="note-bad" v-if="remote.error">{{remote.error}}</div>
+              <div class="files">
+                <div class="row" v-if="remote.path" @click="loadRemote(remoteCrumbs.at(-2).path)"><span class="name">⬆ ย้อนกลับ</span></div>
+                <template v-for="f in remote.items" :key="f.path">
+                  <div class="row" v-if="f.dir" @click="loadRemote(f.path)"><span>📁</span><span class="name">{{f.name}}</span></div>
+                  <label class="row" v-else :class="{off: !f.video}">
+                    <input type="checkbox" :value="f.path" v-model="remote.selected" :disabled="!f.video">
+                    <span class="name">{{f.name}}</span><span class="size">{{size(f.size)}}</span>
+                  </label>
+                </template>
+                <div class="empty" v-if="!remote.items.length && !remote.busy && !remote.error">โฟลเดอร์นี้ว่าง</div>
+              </div>
+              <div class="selection" v-if="remote.selected.length">
+                <span>เลือก {{remote.selected.length}} ไฟล์ · {{size(remoteSelectedSize)}}</span>
+                <button class="ghost small" @click="remote.selected = []">ล้าง</button>
+              </div>
+              <p class="hint">แต่ละไฟล์เป็นงานของตัวเอง: ดาวน์โหลด (ตรวจ header ก่อน, ffprobe หลัง) → แปลง HLS ตามค่าด้านขวา → อัปโหลดไว้ข้างต้นฉบับ</p>
+            </div>
+          </section>
+
+          <aside class="card sticky" v-if="source === 'library'">
+            <h2>ตั้งค่า HLS</h2>
+            <hls-config :config="config">
+              <div class="option-flags" style="margin-top:10px">
+                <label class="check"><input type="checkbox" v-model="remote.deleteSource"> ลบไฟล์ต้นฉบับบน Drive เมื่อสำเร็จ</label>
+              </div>
+              <p class="hint">จะลบก็ต่อเมื่อเห็น playlist ที่อัปโหลดแล้วบน Drive · งานที่ล้มเหลวไม่ลบอะไร · ไฟล์ในเครื่องลบเสมอเมื่อสำเร็จ</p>
+            </hls-config>
+            <button class="wide" @click="queueRemote" :disabled="!remote.selected.length || !config.audio.length">เพิ่ม {{remote.selected.length}} ไฟล์เข้าคิว</button>
+          </aside>
+        </div>
+
+        <!-- ───────────── Files ───────────── -->
+        <section v-if="view === 'files'" class="card">
+          <div class="toolbar">
+            <h2 class="grow-title">ไฟล์ที่ดาวน์โหลด <small class="muted">{{files.length}} ไฟล์ · {{size(files.reduce((n, f) => n + (+f.size || 0), 0))}}</small></h2>
+            <label class="check"><input type="checkbox" :checked="allFilesSelected" :indeterminate.prop="selectedFiles.length > 0 && !allFilesSelected" @change="toggleAllFiles($event.target.checked)" :disabled="!visibleFiles.length"> ทั้งหมด</label>
+            <input v-model="fileSearch" class="filter grow" placeholder="ค้นหาไฟล์…">
+            <select v-model="fileSort" class="small-select" aria-label="เรียงไฟล์">
+              <option value="modified">ใหม่สุดก่อน</option><option value="size">ใหญ่สุดก่อน</option><option value="name">ชื่อ A–Z</option>
+            </select>
+            <button class="ghost small" @click="loadFiles">รีเฟรช</button>
+          </div>
+          <div class="selection" v-if="selectedFiles.length">
+            <span>เลือก {{selectedFiles.length}} ไฟล์ · {{size(selectedFilesSize)}}</span>
+            <button class="small" @click="openConverter(selectedFiles)" :disabled="!selectedVideos.length">แปลง HLS</button>
+            <button class="ghost small" @click="inspectSelected" :disabled="probeBusy"><span class="spinner dim" v-if="probeBusy"></span>ตรวจไฟล์</button>
+            <button class="ghost small" @click="uploadSource">อัปโหลดต้นฉบับ</button>
+            <button class="danger small" @click="deleteFiles">ลบ</button>
+          </div>
+          <div class="files">
+            <label class="row" v-for="file in visibleFiles" :key="file.path">
+              <input type="checkbox" :value="file.path" v-model="selectedFiles">
+              <span class="name" :title="file.relative"><small v-if="dirname(file.relative)">{{dirname(file.relative)}}/</small>{{basename(file.relative)}}</span>
+              <span class="when" v-if="file.modified">{{ago(file.modified)}}</span>
+              <span class="size">{{size(file.size)}}</span>
+            </label>
+            <div class="empty" v-if="!visibleFiles.length">{{files.length ? 'ไม่มีไฟล์ที่ตรงกับคำค้น' : 'ยังไม่มีไฟล์ที่ดาวน์โหลดเสร็จ'}}</div>
+          </div>
+          <div class="sources" v-if="inspected.length">
+            <article class="source" v-for="m in inspected" :key="m.path">
+              <h3>{{m.name}}</h3>
+              <div class="facts">
+                <div><small>ขนาด · ความยาว</small>{{size(m.size)}} · {{clock(m.duration)}}</div>
+                <div><small>วิดีโอ</small>{{m.video.codec}} {{m.video.profile}} · {{m.video.width}}×{{m.video.height}}</div>
+                <div><small>Bitrate</small>{{sourceBitrate(m)}}</div>
+                <div><small>สี</small>{{m.video.pix_fmt}} · {{m.video.hdr ? 'HDR' : 'SDR'}}</div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- ───────────── Convert ───────────── -->
+        <div v-if="view === 'convert'" class="workspace">
+          <section class="card">
+            <div class="toolbar">
+              <h2 class="grow-title">ไฟล์ต้นฉบับ</h2>
+              <button class="ghost small" @click="view = 'files'">เลือกไฟล์</button>
+            </div>
+            <div class="empty" v-if="!convertFiles.length">
+              ยังไม่ได้เลือกไฟล์ ไปที่แท็บ “ไฟล์” แล้วเลือกวิดีโอ กด “แปลง HLS”<br>
+              <button class="small" style="margin-top:10px" @click="view = 'files'">ไปที่แท็บไฟล์</button>
+            </div>
+            <div class="note-muted" v-if="probeBusy"><span class="spinner dim"></span> กำลังตรวจไฟล์…</div>
+            <div class="sources">
+              <article class="source" v-for="m in probe" :key="m.path">
+                <div class="source-head">
+                  <h3>{{m.name}}</h3>
+                  <span class="tag" :class="m.video.hdr ? 'hdr' : ''">{{m.video.hdr ? (m.video.dolby_vision ? 'HDR · Dolby Vision' : 'HDR') : 'SDR'}}</span>
+                  <button class="ghost small" @click="removeConvertFile(m.path)" aria-label="เอาออก">✕</button>
+                </div>
+                <div class="facts">
+                  <div><small>ขนาด · ความยาว</small>{{size(m.size)}} · {{clock(m.duration)}}</div>
+                  <div><small>วิดีโอ</small>{{m.video.codec}} {{m.video.profile}} · {{m.video.width}}×{{m.video.height}}</div>
+                  <div><small>Bitrate · FPS</small>{{sourceBitrate(m)}} · {{fps(m.video.fps)}} fps</div>
+                  <div><small>สี</small>{{m.video.pix_fmt}}</div>
+                  <div><small>ซับไตเติล</small>{{m.subtitles.length || 'ไม่มี'}}</div>
+                </div>
+                <div class="tracks-wrap" v-if="m.audio.length">
+                  <table class="tracks">
+                    <thead><tr><th>#</th><th>ภาษา / ชื่อ</th><th>Codec</th><th>Channels</th><th>Sample</th><th>Bitrate</th><th>เริ่ม</th></tr></thead>
+                    <tbody><tr v-for="a in m.audio" :key="a.index"><td>{{a.index}}</td><td>{{a.language}} · {{a.title}}</td><td>{{a.codec}} {{a.profile}}</td><td>{{a.channels}} · {{a.layout}}</td><td>{{a.sample_rate / 1000}} kHz</td><td>{{bitrate(a.bit_rate)}}</td><td>{{(+a.first_packet).toFixed(3)}}s</td></tr></tbody>
+                  </table>
+                </div>
+              </article>
+            </div>
+          </section>
+          <aside class="card sticky">
+            <h2>ตั้งค่า HLS</h2>
+            <hls-config :config="config" :probe="probe">
+              <div class="option-flags" style="margin-top:10px">
+                <label class="check"><input type="checkbox" v-model="config.upload"> อัปโหลดขึ้น Drive</label>
+                <label class="check"><input type="checkbox" v-model="config.keepLocal"> เก็บ HLS ไว้ในเครื่อง</label>
+              </div>
+            </hls-config>
+            <button class="wide" @click="startConvert" :disabled="!convertFiles.length || !config.audio.length || probeBusy">เริ่มแปลง {{convertFiles.length}} ไฟล์</button>
+          </aside>
+        </div>
+      </main>
+    </template>
+
+    <log-drawer v-if="logJob" :job-id="logJob" :row="logJobRow" :api="api" @close="logJob = ''" @notify="notify"></log-drawer>
+
+    <div class="toasts" aria-live="polite">
+      <div class="toast" v-for="toast in toasts" :key="toast.id" :class="toast.kind" @click="dismiss(toast.id)">{{toast.text}}</div>
+    </div>
+  </div>
   <script src="/assets/vue.global.prod.js"></script>
   <script src="/assets/qrcode.js"></script>
   <script src="/assets/bili-login.js"></script>
-  <script src="/assets/app.js"></script>
+  <script src="/assets/shared.js"></script>
+  <script src="/assets/studio.js"></script>
 </body>
 </html>

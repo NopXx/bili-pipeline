@@ -24,7 +24,7 @@ On a host with two visible NVIDIA GPUs, two HLS conversions run at once, one per
 - `public/prep-hls.sh` — the HLS builder (copied from hls-prep; update it from there).
 - `scripts/remote_fetch.py` — Drive-queue downloader: rclone copy with an MKV header check before and ffprobe verification after.
 - `lib/hls.js` — playlist/mime helpers shared by the uploaders.
-- `frontend/` — the web UI (`index.html` + `assets/app.js`), served by `bili_web.py`.
+- `frontend/` — the web UI served by `bili_web.py` (Vue from a vendored build, no bundler): `index.html` + `assets/studio.js` (Studio: queue, add, files, HLS converter) and `transfer.html` + `assets/transfer.js` (transfer-only mode). Both share `assets/shared.js` (job card, log drawer, helpers), `assets/ui.css`, and the Bilibili login component `assets/bili-login.js`.
 
 ## Setup
 

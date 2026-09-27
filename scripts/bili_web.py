@@ -63,7 +63,7 @@ BILI_AUDIO_QUALITIES = ("auto", "HI_RES", "DOLBY_ATMOS", "192K", "132K", "64K")
 BILI_CONTAINERS = ("mp4", "mkv")
 JOB_DETAIL_KEYS = ("phase", "error", "exit_code", "speed", "eta", "done", "total", "peers",
                    "downloaded_bytes", "total_bytes", "speed_bytes", "current_file", "file_index", "file_count",
-                   "destination", "title")
+                   "destination", "title", "eta_seconds")
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(TORRENT_DOWNLOADS_DIR, exist_ok=True)
@@ -1256,6 +1256,9 @@ class H(BaseHTTPRequestHandler):
                 "details": {key: state[key] for key in JOB_DETAIL_KEYS if state.get(key) not in (None, "")},
                 # Server clock, so the UI can time jobs even when the viewer's clock is off.
                 "now": time.time(),
+                # What a finished download produced, so the UI can offer to convert it.
+                "files": [path for path in (state.get("video_files") or state.get("files") or [])[:50]
+                          if isinstance(path, str) and os.path.isfile(path)] if status in ("downloaded", "completed") else [],
             })
         rows.sort(key=lambda row: (row["status"] in ("running", "queued", "paused"), row["modified"]), reverse=True)
         self._send(200, json.dumps(rows[:100]))

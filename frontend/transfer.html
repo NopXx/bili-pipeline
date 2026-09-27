@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bili Studio · Download / Upload</title>
-  <link rel="stylesheet" href="/assets/transfer.css">
+  <link rel="stylesheet" href="/assets/ui.css">
   <link rel="stylesheet" href="/assets/bili-login.css">
 </head>
 <body>
@@ -148,27 +148,8 @@
           </div>
 
           <div class="jobs">
-            <article class="job" v-for="job in visibleJobs" :key="job.job" :class="['s-' + job.status, {selected: logJob === job.job}]">
-              <div class="job-head">
-                <span class="badge" :class="'s-' + job.status">{{statusLabel(job.status)}}</span>
-                <span class="kind">{{kindLabel(job)}}</span>
-                <b class="job-name" :title="job.url || job.job">{{jobLabel(job)}}</b>
-                <span class="pct" v-if="showPercent(job)">{{Math.floor(+job.progress || 0)}}%</span>
-              </div>
-              <div class="bar-track" v-if="showPercent(job) || job.status === 'running'"><div class="bar-fill" :class="{live: job.status === 'running'}" :style="{width: (+job.progress || 0) + '%'}"></div></div>
-              <div class="job-meta">
-                <span v-for="part in jobFacts(job)" :key="part">{{part}}</span>
-              </div>
-              <div class="job-error" v-if="jobError(job)">{{jobError(job)}}</div>
-              <div class="job-actions">
-                <button class="ghost small" @click="openLog(job)">Log</button>
-                <button v-if="['queued','running'].includes(job.status)" class="ghost small" @click="pause(job.job)">หยุดชั่วคราว</button>
-                <button v-if="job.status === 'paused'" class="small" @click="resume(job.job)">ทำต่อ</button>
-                <button v-if="['queued','running','paused'].includes(job.status)" class="danger small" @click="cancel(job.job)">ยกเลิก</button>
-                <button v-if="['failed','interrupted','cancelled','stopped'].includes(job.status)" class="small" @click="retry(job.job)">ลองใหม่</button>
-                <span class="job-id">{{job.job}}</span>
-              </div>
-            </article>
+            <job-card v-for="job in visibleJobs" :key="job.job" :job="job" :now="now" :selected="logJob === job.job"
+              @log="logJob = $event.job" @pause="pause" @resume="resume" @cancel="cancel" @retry="retry"></job-card>
             <div class="empty" v-if="!visibleJobs.length">{{jobs.length ? 'ไม่มีงานที่ตรงกับตัวกรอง' : 'ยังไม่มีงาน เพิ่มงานดาวน์โหลดได้จากแผงด้านซ้าย'}}</div>
           </div>
         </template>
@@ -204,38 +185,7 @@
     </main>
 
     <!-- Log viewer -->
-    <div class="scrim" v-if="logJob" @click="closeLog"></div>
-    <aside class="log-drawer" v-if="logJob" role="dialog" aria-label="Job log">
-      <header class="log-head">
-        <div class="log-title">
-          <span class="badge" :class="'s-' + (logJobRow?.status || 'stopped')">{{statusLabel(logJobRow?.status || 'stopped')}}</span>
-          <b :title="logJobRow?.url">{{logJobRow ? jobLabel(logJobRow) : logJob}}</b>
-          <small>{{logJob}}</small>
-        </div>
-        <button class="ghost small" @click="closeLog" aria-label="ปิด">✕</button>
-      </header>
-      <div class="log-live" v-if="logProgress">
-        <span class="live-dot" v-if="logJobRow?.status === 'running'"></span>{{logProgress}}
-      </div>
-      <div class="log-tools">
-        <label class="check"><input type="checkbox" v-model="logFollow"> ติดตามบรรทัดล่าสุด</label>
-        <label class="check"><input type="checkbox" v-model="logHideProgress"> ซ่อนบรรทัด progress</label>
-        <input v-model="logSearch" class="filter grow" placeholder="กรองบรรทัด…">
-        <button class="ghost small" @click="copyLog">คัดลอก</button>
-        <button class="ghost small" @click="downloadLog">ดาวน์โหลด</button>
-      </div>
-      <div class="log-body" ref="logBody" @scroll="onLogScroll">
-        <button class="ghost small older" v-if="logStart > 0" @click="loadOlderLog" :disabled="logLoadingOlder">{{logLoadingOlder ? 'กำลังโหลด…' : 'โหลดบรรทัดก่อนหน้า'}}</button>
-        <div class="log-note" v-if="logHiddenCount">ซ่อน {{logHiddenCount}} บรรทัด{{logSearch ? '' : ' progress'}}</div>
-        <div v-for="line in logVisible" :key="line.id" class="ln" :class="'k-' + line.kind">{{line.text}}</div>
-        <div class="log-note" v-if="!logLines.length && !logLoading">log ยังว่างอยู่</div>
-        <div class="log-note" v-if="logLoading">กำลังโหลด log…</div>
-      </div>
-      <footer class="log-foot">
-        <span>{{logLines.length}} บรรทัด · {{size(logSize)}}</span>
-        <button class="small" v-if="!logFollow" @click="jumpToEnd">ไปบรรทัดล่าสุด ↓</button>
-      </footer>
-    </aside>
+    <log-drawer v-if="logJob" :job-id="logJob" :row="logJobRow" :api="api" @close="logJob = ''" @notify="notify"></log-drawer>
 
     <div class="toasts" aria-live="polite">
       <div class="toast" v-for="toast in toasts" :key="toast.id" :class="toast.kind" @click="dismiss(toast.id)">{{toast.text}}</div>
@@ -244,6 +194,7 @@
   <script src="/assets/vue.global.prod.js"></script>
   <script src="/assets/qrcode.js"></script>
   <script src="/assets/bili-login.js"></script>
+  <script src="/assets/shared.js"></script>
   <script src="/assets/transfer.js"></script>
 </body>
 </html>
