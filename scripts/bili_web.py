@@ -1254,6 +1254,8 @@ class H(BaseHTTPRequestHandler):
                 "started_at": (current or {}).get("started_at") or state.get("started_at"),
                 "finished_at": (current or {}).get("finished_at") or state.get("finished_at"),
                 "details": {key: state[key] for key in JOB_DETAIL_KEYS if state.get(key) not in (None, "")},
+                # Server clock, so the UI can time jobs even when the viewer's clock is off.
+                "now": time.time(),
             })
         rows.sort(key=lambda row: (row["status"] in ("running", "queued", "paused"), row["modified"]), reverse=True)
         self._send(200, json.dumps(rows[:100]))

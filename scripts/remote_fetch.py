@@ -12,16 +12,12 @@ if not, the copy is retried once with multi-threaded transfer turned off.
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 
-from process_media import update_state
+from process_media import RCLONE_STATS as STATS, update_state
 
 EBML = b"\x1aE\xdf\xa3"
-STATS = re.compile(
-    r"([\d.]+\s*[kKMGTPE]?i?B)\s*/\s*([\d.]+\s*[kKMGTPE]?i?B),\s*(\d{1,3})%,\s*([\d.]+\s*[kKMGTPE]?i?B/s)(?:,\s*ETA\s+([^\s,]+))?"
-)
 
 
 def hexbytes(data):

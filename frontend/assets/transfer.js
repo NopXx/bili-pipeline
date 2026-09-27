@@ -16,7 +16,7 @@ const KIND = { torrent: 'BitTorrent', drive_download: 'Google Drive', remote_dow
 // once-a-second updates.
 const PROGRESS_LINE = [
   /^(torrent|drive|upload|hls|download|remote)\s*\|\s*\d{1,3}(\.\d+)?%/i,
-  /\d{1,3}%,\s*[\d.]+\s*[kKMGTPE]?i?B\/s/,
+  /\d{1,3}%,\s*[\d.]+\s*[kKMGTPE]?i?(?:B|Bytes)\/s/,
   /^\[#[0-9a-f]+ .*\]$/i,
   /^\S*\s*\d{1,3}(\.\d+)?%\s+\d{1,2}:\d{2}:\d{2}/,
   /^Transferred:/,
@@ -72,7 +72,7 @@ createApp({
     jobs: [], jobFilter: 'all', laneFilter: 'all', jobSearch: '',
     logJob: '', logLines: [], logStart: 0, logOffset: 0, logSize: 0, logLoading: false, logLoadingOlder: false,
     logFollow: true, logHideProgress: true, logSearch: '', logRequest: 0,
-    now: Date.now(), healthAt: 0, timer: null,
+    now: Date.now(), clockSkew: 0, healthAt: 0, timer: null,
   } },
   computed: {
     transferJobs() { return this.jobs.filter(job => job.lane !== 'convert' && job.kind !== 'torrent_inspect' && job.kind !== 'hls') },
@@ -368,7 +368,10 @@ createApp({
     async loadJobs() {
       if (!this.token) return
       try {
-        this.jobs = (await this.api('/api/jobs')).sort((a, b) =>
+        const rows = await this.api('/api/jobs')
+        // Durations mix server timestamps with "now"; measure on the server's clock.
+        if (rows.length && rows[0].now) { this.clockSkew = rows[0].now * 1000 - Date.now(); this.now = Date.now() + this.clockSkew }
+        this.jobs = rows.sort((a, b) =>
           (GROUP[a.status] === 'running' ? 0 : GROUP[a.status] === 'waiting' ? 1 : 2) - (GROUP[b.status] === 'running' ? 0 : GROUP[b.status] === 'waiting' ? 1 : 2) ||
           String(b.created).localeCompare(String(a.created)) || b.job.localeCompare(a.job))
       } catch (error) { this.lastError = error.message; throw error }
@@ -464,7 +467,7 @@ createApp({
 
     // --- refresh loop -------------------------------------------------------
     async refresh(force = false) {
-      this.now = Date.now()
+      this.now = Date.now() + this.clockSkew
       if (!this.token) return
       try {
         await this.loadJobs()

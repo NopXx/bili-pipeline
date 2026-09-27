@@ -31,6 +31,23 @@ class EngineEnvTests(unittest.TestCase):
                          {"PREP_LADDER": "1", "PREP_LADDER_HEIGHTS": "hdr", "PREP_HDR_BITRATE": "15M"})
 
 
+class RcloneProgressTests(unittest.TestCase):
+    def test_upload_progress_from_old_and_new_rclone_formats(self):
+        from process_media import run_with_progress
+        lines = [
+            # Ubuntu's older rclone: no space before the unit, "GBytes", "MBytes/s".
+            "2026/09/27 09:50:01 NOTICE:       992M / 13.341 GBytes, 7%, 49.932 MBytes/s, ETA 4m13s",
+            "2026/09/27 NOTICE:   208.382 MiB / 8.501 GiB, 2%, 32.095 MiB/s, ETA 4m24s",
+        ]
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            state = Path(directory) / "state.json"
+            for line, expected in zip(lines, [(7, "49.932 MBytes/s", "992M", "4m13s"), (2, "32.095 MiB/s", "208.382 MiB", "4m24s")]):
+                state.write_text("{}")
+                run_with_progress([sys.executable, "-c", f"print({line!r})"], dict(os.environ), 0, "UPLOAD", str(state))
+                data = json.loads(state.read_text())
+                self.assertEqual((data["progress"], data["speed"], data["done"], data["eta"]), expected)
+
+
 class RemoteQueueTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(dir=Path(__file__).parent)

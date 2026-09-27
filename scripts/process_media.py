@@ -19,6 +19,16 @@ DOWNLOADS = Path(os.environ.get("BILI_DOWNLOADS_DIR", "/opt/bili-downloads")).re
 HLS_ROOT = Path(os.environ.get("BILI_HLS_DIR", "/opt/bili-hls")).resolve()
 
 
+# rclone --stats-one-line summary. Newer builds print
+# `208.382 MiB / 8.501 GiB, 2%, 32.095 MiB/s, ETA 4m24s`; older ones (e.g.
+# Ubuntu's apt package) print `188.371M / 13.341 GBytes, 1%, 38.707 MBytes/s`.
+# The NOTICE prefix varies by version too, so only the summary is matched.
+_SIZE = r"[\d.]+\s*(?:[kKMGTPE]i?(?:B|Bytes)?|B|Bytes)?"
+RCLONE_STATS = re.compile(
+    rf"({_SIZE})\s*/\s*({_SIZE}),\s*(\d{{1,3}})%,\s*([\d.]+\s*[kKMGTPE]?i?(?:B|Bytes)/s)(?:,\s*ETA\s+([^\s,]+))?"
+)
+
+
 def update_state(path, **values):
     data = {}
     try:
@@ -102,27 +112,16 @@ def run_with_progress(command, env, total, label, state_path):
             update_state(state_path, progress=percent, speed=speed.strip())
             last_percent = percent
             continue
-        # rclone --stats-one-line prints e.g.
-        # `208.382 MiB / 8.501 GiB, 2%, 32.095 MiB/s, ETA 4m24s`.
-        # Its NOTICE prefix varies by version, so match the transfer summary.
-        rclone_progress = None
-        if label == "UPLOAD":
-            rclone_progress = re.search(
-                r"([\d.]+\s+[kKMGTPE]?i?B)\s*/\s*"
-                r"([\d.]+\s+[kKMGTPE]?i?B),\s*"
-                r"(\d{1,3})%,\s*"
-                r"([\d.]+\s+[kKMGTPE]?i?B/s)",
-                text,
-            )
+        rclone_progress = RCLONE_STATS.search(text) if label == "UPLOAD" else None
         if rclone_progress:
             percent = min(100, int(rclone_progress.group(3)))
             # The log keeps one line per percent; the state file gets every
             # reading so the queue card's speed and ETA stay live.
-            eta = re.search(r"ETA\s+([^\s,]+)", text)
+            eta = rclone_progress.group(5)
             update_state(
                 state_path, progress=percent, speed=rclone_progress.group(4),
                 done=rclone_progress.group(1), total=rclone_progress.group(2),
-                eta=eta.group(1) if eta and eta.group(1) != "-" else "",
+                eta=eta if eta and eta != "-" else "",
             )
             if percent != last_percent:
                 print(
