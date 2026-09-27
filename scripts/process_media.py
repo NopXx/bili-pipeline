@@ -99,7 +99,7 @@ def run_with_progress(command, env, total, label, state_path):
             percent = min(100, int(pct_marker.group(1)))
             speed = f" {_human_speed(pct_marker.group(2))}" if pct_marker.group(2) else ""
             print(f"{label} | {percent}% |{speed}", flush=True)
-            update_state(state_path, progress=percent)
+            update_state(state_path, progress=percent, speed=speed.strip())
             last_percent = percent
             continue
         # rclone --stats-one-line prints e.g.
@@ -116,13 +116,20 @@ def run_with_progress(command, env, total, label, state_path):
             )
         if rclone_progress:
             percent = min(100, int(rclone_progress.group(3)))
+            # The log keeps one line per percent; the state file gets every
+            # reading so the queue card's speed and ETA stay live.
+            eta = re.search(r"ETA\s+([^\s,]+)", text)
+            update_state(
+                state_path, progress=percent, speed=rclone_progress.group(4),
+                done=rclone_progress.group(1), total=rclone_progress.group(2),
+                eta=eta.group(1) if eta and eta.group(1) != "-" else "",
+            )
             if percent != last_percent:
                 print(
                     f"UPLOAD | {percent}% | {rclone_progress.group(4)} "
                     f"· {rclone_progress.group(1)} / {rclone_progress.group(2)}",
                     flush=True,
                 )
-                update_state(state_path, progress=percent)
                 last_percent = percent
             continue
         # hls-prep reports `[bar] 12.34% 00:14:54 / 02:00:51 300 fps 12x`.

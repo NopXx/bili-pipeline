@@ -136,7 +136,14 @@ def emit(line, state_path, base_state, log_state):
             print(status, flush=True)
             log_state["last_log_at"] = now
         if pct != log_state["progress"] or should_log:
-            write_state(state_path, {**base_state, "phase": "torrent", "status": "downloading", "progress": pct})
+            write_state(state_path, {
+                **base_state, "phase": "torrent", "status": "downloading", "progress": pct,
+                "done": details["done"], "total": details["total"],
+                # aria2 prints DL:5.2MiB — a per-second rate without the unit.
+                "speed": speed.group(1).removesuffix("/s") + "/s" if speed else "0B/s",
+                "peers": int(peers.group(1)) if peers else 0,
+                "eta": eta.group(1) if eta else "",
+            })
             log_state["progress"] = pct
     elif line.startswith("FILE:"):
         if line not in log_state["files"]:

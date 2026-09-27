@@ -51,6 +51,18 @@ class TransferOnlyTests(unittest.TestCase):
                 self.assertEqual(failure.exception.code, 403)
                 job = post("/api/upload", {"files": [str(source)]})["job"]
                 self.assertEqual(web.jobs[job]["lane"], "upload")
+                tail = post("/api/log", {"job": job})
+                self.assertIn("queued in upload lane", tail["text"])
+                self.assertEqual(tail["offset"], tail["size"])
+                with open(web.jobs[job]["log"], "a", encoding="utf-8", newline="") as log:
+                    log.write("ไฟล์ 1\npartial")
+                follow = post("/api/log", {"job": job, "offset": tail["offset"]})
+                self.assertEqual(follow["text"], "ไฟล์ 1\n")  # the unfinished line waits
+                self.assertEqual(post("/api/log", {"job": job, "offset": follow["offset"]})["text"], "")
+                self.assertTrue(post("/api/log", {"job": job, "offset": 10 ** 9})["reset"])
+                older = post("/api/log", {"job": job, "before": follow["start"]})
+                self.assertEqual(older["start"], 0)
+                self.assertEqual(older["text"], tail["text"])
                 inspection = post("/api/torrent/inspect", {
                     "torrent_data": base64.b64encode(b"d3:foo3:bare").decode()
                 })["job"]

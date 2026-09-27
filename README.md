@@ -14,7 +14,7 @@ On a host with two visible NVIDIA GPUs, two HLS conversions run at once, one per
 
 ## Layout
 
-- `scripts/bili_web.py` — HTTP control server (token-guarded, loopback; reach it over an SSH tunnel). Routes include queue status, pause/resume/cancel/retry, and files.
+- `scripts/bili_web.py` — HTTP control server (token-guarded, loopback; reach it over an SSH tunnel). Routes include queue status, pause/resume/cancel/retry, files, and `/api/log` (byte-range job log reads: tail, follow from an offset, page back with `before`, or `full` for download).
 - `scripts/job_queue.py` — persistent per-lane scheduler; queued jobs survive a server restart.
 - `scripts/process_media.py` — validates and converts to HLS; it does not upload inline.
 - `scripts/upload_media.py` — independently uploads finished HLS bundles or original files.

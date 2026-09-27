@@ -36,7 +36,8 @@ def main():
     try:
         for index, path in enumerate(paths, 1):
             print(f"==> uploading [{index}/{len(paths)}]: {path.name}", flush=True)
-            update_state(state_path, current_file=str(path), progress=0)
+            update_state(state_path, current_file=str(path), progress=0, speed="", done="", total="", eta="",
+                         file_index=index, file_count=len(paths))
             if RCLONE_REMOTE:
                 destination = f"{RCLONE_REMOTE}/{path.name}" if kind == "hls" else f"{RCLONE_REMOTE}/{path.stem}/{path.name}"
                 command = ["rclone", "copy" if kind == "hls" else "copyto", str(path), destination,

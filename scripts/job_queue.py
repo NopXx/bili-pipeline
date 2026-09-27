@@ -33,6 +33,16 @@ def visible_convert_gpus():
     return []
 
 
+def log_event(log_path, message):
+    """Append a timestamped lifecycle line (`==> [time] message`) to a job log."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    try:
+        with open(log_path, "a", encoding="utf-8") as out:
+            out.write(f"==> [{stamp}] {message}\n")
+    except OSError:
+        pass
+
+
 class JobQueue:
     def __init__(self, jobs_dir, on_complete=None, download_concurrency=None, convert_gpus=None):
         if download_concurrency is None:
@@ -66,7 +76,7 @@ class JobQueue:
         os.replace(temporary, path)
 
     def _persist(self, item):
-        record = {key: item[key] for key in ("job", "lane", "command", "env_overrides", "log", "state", "meta", "status", "created_at", "gpu")}
+        record = {key: item[key] for key in ("job", "lane", "command", "env_overrides", "log", "state", "meta", "status", "created_at", "gpu", "started_at", "finished_at")}
         record["pid"] = item["proc"].pid if item["proc"] is not None else item.get("pid")
         path = self.root / f"{item['job']}.queue.json"
         temporary = Path(str(path) + ".tmp")
@@ -81,6 +91,8 @@ class JobQueue:
                     continue
                 record["proc"] = None
                 record.setdefault("gpu", None)
+                record.setdefault("started_at", None)
+                record.setdefault("finished_at", None)
                 record["cancelled"] = False
                 # Never mistake an orphaned worker for a managed process after
                 # a web-server restart. Queued work survives; running work is
@@ -130,9 +142,11 @@ class JobQueue:
                 "meta": str(self.root / f"{job}.meta.json"),
                 "status": "queued", "created_at": time.time(),
                 "proc": None, "cancelled": False, "gpu": None,
+                "started_at": None, "finished_at": None,
             }
             Path(item["log"]).touch()
-            self._state(item, status="queued", phase="queued")
+            self._state(item, status="queued", phase="queued", queued_at=item["created_at"])
+            log_event(item["log"], f"queued in {lane} lane")
             self.jobs[job] = item
             self._persist(item)
             return item
@@ -161,6 +175,7 @@ class JobQueue:
                 raise ValueError("job is not running or queued")
             self._state(item, status="paused", phase="paused")
             self._persist(item)
+            log_event(item["log"], "paused by user")
             return item
 
     def resume(self, job, before_resume=None):
@@ -180,6 +195,7 @@ class JobQueue:
                 item["status"] = "running"
             self._state(item, status=item["status"], phase=item["lane"])
             self._persist(item)
+            log_event(item["log"], "resumed" if item["status"] == "running" else "resumed; waiting in queue")
             return item
 
     def cancel(self, job, before_cancel=None):
@@ -196,10 +212,10 @@ class JobQueue:
                 os.killpg(proc.pid, signal.SIGTERM)
             item["status"] = "cancelled"
             item["cancelled"] = True
+            item["finished_at"] = time.time()
             self._state(item, status="cancelled", phase="cancelled")
             self._persist(item)
-            with open(item["log"], "a", encoding="utf-8") as out:
-                out.write("\n==> CANCELLED BY USER\n")
+            log_event(item["log"], "CANCELLED BY USER")
             return item
 
     def pump(self):
@@ -213,9 +229,13 @@ class JobQueue:
                 if code is None:
                     continue
                 item["status"] = "completed" if code == 0 else "failed"
+                item["finished_at"] = time.time()
+                finished = {"finished_at": item["finished_at"], "exit_code": code}
                 if code != 0:
-                    self._state(item, status="failed", phase="failed", exit_code=code)
+                    finished.update(status="failed", phase="failed")
+                self._state(item, **finished)
                 self._persist(item)
+                log_event(item["log"], "finished" if code == 0 else f"failed with exit code {code}")
                 completed.append((item, code))
             for lane in LANES:
                 active = sum(item["lane"] == lane and item["status"] == "running" for item in self.jobs.values())
@@ -238,6 +258,7 @@ class JobQueue:
                         worker_env = {**os.environ, **item["env_overrides"], "BILI_QUEUE_JOB_ID": item["job"]}
                         if gpu is not None:
                             worker_env["CUDA_VISIBLE_DEVICES"] = gpu
+                        log_event(item["log"], f"started on GPU {gpu}" if gpu is not None else "started")
                         log = open(item["log"], "a", encoding="utf-8")
                         try:
                             proc = subprocess.Popen(
@@ -249,13 +270,16 @@ class JobQueue:
                         item["proc"] = proc
                         item["gpu"] = gpu
                         item["status"] = "running"
-                        self._state(item, status="running", phase=lane, gpu=gpu)
+                        item["started_at"] = time.time()
+                        item["finished_at"] = None
+                        self._state(item, status="running", phase=lane, gpu=gpu, started_at=item["started_at"], finished_at=None)
                         self._persist(item)
                         slots -= 1
                     except Exception as exc:
                         item["status"] = "failed"
                         self._state(item, status="failed", phase="failed", error=str(exc))
                         self._persist(item)
+                        log_event(item["log"], f"could not start: {exc}")
         for item, code in completed:
             if self.on_complete:
                 self.on_complete(item, code)

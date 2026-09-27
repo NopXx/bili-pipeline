@@ -48,6 +48,13 @@ TOKEN = os.environ.get("BILI_WEB_TOKEN") or ""
 HOST = os.environ.get("BILI_WEB_HOST", "127.0.0.1")  # loopback; tunnel in over SSH
 PORT = int(os.environ.get("BILI_WEB_PORT", "8787"))
 TRANSFER_ONLY = os.environ.get("BILI_TRANSFER_ONLY") == "1"
+LOG_TAIL = 128 * 1024  # first view of a log
+LOG_CHUNK = 512 * 1024  # one incremental or "older lines" read
+LOG_FULL_LIMIT = 32 * 1024 * 1024  # log download
+# Live transfer details a worker mirrors into its state file, passed to the UI.
+JOB_DETAIL_KEYS = ("phase", "error", "exit_code", "speed", "eta", "done", "total", "peers",
+                   "downloaded_bytes", "total_bytes", "speed_bytes", "current_file", "file_index", "file_count",
+                   "destination")
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(TORRENT_DOWNLOADS_DIR, exist_ok=True)
@@ -481,6 +488,7 @@ class H(BaseHTTPRequestHandler):
         "/api/torrent/inspect": "handle_torrent_inspect",
         "/api/drive/download": "handle_drive_download",
         "/api/status": "handle_status",
+        "/api/log": "handle_log",
         "/api/cancel": "handle_cancel",
         "/api/pause": "handle_pause",
         "/api/resume": "handle_resume",
@@ -729,6 +737,53 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, json.dumps({"error": f"invalid downloaded file: {path}"}))
         job = enqueue_upload([os.path.realpath(path) for path in files], "source")
         self._send(200, json.dumps({"job": job}))
+
+    def handle_log(self, body):
+        """Read a job log by byte range so the viewer can follow it incrementally.
+
+        With no offset it returns the tail; with `offset` it returns what was
+        appended since; with `before` it returns the chunk preceding that byte
+        (to page back through older lines); `full` returns the whole log for
+        download. Ranges always cover whole lines, so a multi-byte character is
+        never split between two reads.
+        """
+        job = body.get("job") or ""
+        if len(job) != 16 or any(c not in "0123456789abcdef" for c in job):
+            return self._send(404, json.dumps({"error": "unknown job"}))
+        log_path = os.path.join(JOBS_DIR, job + ".log")
+        try:
+            size = os.path.getsize(log_path)
+        except OSError:
+            return self._send(404, json.dumps({"error": "unknown job"}))
+        offset, before = body.get("offset"), body.get("before")
+        valid = lambda value: isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= size
+        reset = offset is not None and not valid(offset)
+        if body.get("full"):
+            start, end, trim_head = max(0, size - LOG_FULL_LIMIT), size, True
+        elif before is not None:
+            end = before if valid(before) else size
+            start, trim_head = max(0, end - LOG_CHUNK), True
+        elif offset is not None and not reset:
+            start, end, trim_head = offset, min(size, offset + LOG_CHUNK), False
+        else:
+            start, end, trim_head = max(0, size - LOG_TAIL), size, True
+        with open(log_path, "rb") as source:
+            source.seek(start)
+            data = source.read(end - start)
+        if trim_head and start > 0:
+            cut = data.find(b"\n")
+            if cut >= 0:
+                data, start = data[cut + 1:], start + cut + 1
+        last = data.rfind(b"\n")
+        if last >= 0:
+            data = data[:last + 1]
+        elif len(data) < LOG_CHUNK:
+            # An unfinished line: wait until the worker completes it.
+            data = b""
+        self._send(200, json.dumps({
+            "text": data.decode("utf-8", "replace"),
+            "start": start, "offset": start + len(data), "size": size, "reset": reset,
+        }))
 
     def handle_status(self, body):
         job = body.get("job") or ""
@@ -979,6 +1034,9 @@ class H(BaseHTTPRequestHandler):
                 "parent_job": meta.get("parent_job"),
                 "created": meta.get("created", time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(modified))),
                 "log_size": size, "modified": modified,
+                "started_at": (current or {}).get("started_at") or state.get("started_at"),
+                "finished_at": (current or {}).get("finished_at") or state.get("finished_at"),
+                "details": {key: state[key] for key in JOB_DETAIL_KEYS if state.get(key) not in (None, "")},
             })
         rows.sort(key=lambda row: (row["status"] in ("running", "queued", "paused"), row["modified"]), reverse=True)
         self._send(200, json.dumps(rows[:100]))
@@ -1040,7 +1098,9 @@ class H(BaseHTTPRequestHandler):
                 if root.startswith(os.path.join(DOWNLOADS_DIR, "drive") + os.sep) and n.endswith(".part"):
                     continue
                 try:
-                    out.append({"path": p, "relative": os.path.relpath(p, DOWNLOADS_DIR), "size": os.path.getsize(p)})
+                    info = os.stat(p)
+                    out.append({"path": p, "relative": os.path.relpath(p, DOWNLOADS_DIR),
+                                "size": info.st_size, "modified": info.st_mtime})
                 except OSError:
                     continue
         out.sort(key=lambda f: f["size"], reverse=True)

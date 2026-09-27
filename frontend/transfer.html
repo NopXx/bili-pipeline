@@ -4,55 +4,221 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bili Studio · Download / Upload</title>
-  <link rel="stylesheet" href="/assets/style.css">
-  <style>
-    .transfer-main{max-width:1100px;margin:0 auto;padding:18px}
-    .transfer-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    .transfer-actions input[type=checkbox]{width:auto}
-    .transfer-job{padding:12px;border:1px solid #273245;border-radius:10px;margin:8px 0}
-    .transfer-job-top{display:flex;gap:10px;align-items:center;justify-content:space-between;overflow-wrap:anywhere}
-    .transfer-job pre{max-height:340px;overflow:auto;white-space:pre-wrap}
-    .transfer-section{margin-bottom:18px}
-    .transfer-url{width:100%;box-sizing:border-box}
-  </style>
+  <link rel="stylesheet" href="/assets/transfer.css">
 </head>
 <body>
-  <div id="transfer-app" class="shell">
-    <header class="top"><div class="brand">Bili <span>Studio</span> <small>Transfer</small></div><div class="token"><input v-model="token" type="password" placeholder="Access token" @keyup.enter="saveToken"><button class="secondary" @click="saveToken">Save</button></div></header>
-    <main class="transfer-main">
-      <div class="note" v-if="message">{{message}}</div>
-      <nav class="tabs"><button v-for="entry in [['download','ดาวน์โหลด'],['files','ไฟล์ / อัปโหลด'],['queue','คิวงาน']]" :class="{active:tab===entry[0]}" @click="tab=entry[0]">{{entry[1]}}</button></nav>
-      <section v-if="tab==='download'" class="panel transfer-section">
-        <h2>ดาวน์โหลดไฟล์</h2>
-        <div class="modes"><div v-for="mode in [['drive','Google Drive'],['torrent','BitTorrent'],['bili','Bilibili']]" class="mode" :class="{active:source===mode[0]}" @click="source=mode[0]"><b>{{mode[1]}}</b></div></div>
-        <div v-if="source==='drive'" class="field"><label>ลิงก์ไฟล์ Google Drive หรือ File ID</label><input v-model="driveLink" class="transfer-url" placeholder="https://drive.google.com/file/d/…/view" @keyup.enter="submitDrive"><small class="muted">ใช้ rclone remote ที่ตั้งใน notebook · รองรับไฟล์เดี่ยว ไม่รองรับโฟลเดอร์</small><button @click="submitDrive" :disabled="!driveLink.trim()">เพิ่มเข้าคิว</button></div>
-        <div v-if="source==='torrent'">
-          <div class="field"><label>Magnet link หรือ URL ไฟล์ .torrent</label><input v-model="torrentSource" class="transfer-url" placeholder="magnet:?xt=urn:btih:…" :disabled="!!torrentData"></div>
-          <div class="field"><label>หรือเลือกไฟล์ .torrent</label><input type="file" accept=".torrent,application/x-bittorrent" @change="chooseTorrent" :disabled="!!torrentSource.trim()"></div>
-          <button @click="inspectTorrent" :disabled="inspectionPending||(!torrentSource.trim()&&!torrentData)">{{inspectionPending?'กำลังอ่านรายการไฟล์…':'อ่านรายการไฟล์'}}</button>
-          <label v-if="torrentFiles.length" class="item" style="margin-top:8px"><input type="checkbox" :checked="selectedTorrent.length===torrentFiles.length" :indeterminate.prop="selectedTorrent.length>0&&selectedTorrent.length<torrentFiles.length" @change="toggleAllTorrent($event.target.checked)"><span class="item-main"><b>เลือกทั้งหมด</b> · {{selectedTorrent.length}} / {{torrentFiles.length}} ไฟล์ · {{size(torrentFiles.filter(file=>selectedTorrent.includes(file.index)).reduce((sum,file)=>sum+file.size,0))}}</span></label>
-          <div v-if="torrentFiles.length" class="list"><label class="item" v-for="file in torrentFiles" :key="file.index"><input type="checkbox" :value="file.index" v-model="selectedTorrent"><span class="item-main">{{file.path}} · {{size(file.size)}}</span></label></div>
-          <button v-if="torrentFiles.length" @click="submitTorrent" :disabled="!selectedTorrent.length">ดาวน์โหลดไฟล์ที่เลือก</button>
+  <div id="transfer-app" v-cloak>
+    <header class="bar">
+      <div class="brand">Bili <span>Studio</span> <small>Transfer</small></div>
+      <div class="bar-stats" v-if="token">
+        <span class="chip" :class="online ? 'ok' : 'bad'" :title="online ? 'เชื่อมต่อเซิร์ฟเวอร์แล้ว' : lastError"><i class="dot"></i>{{online ? 'ออนไลน์' : 'ขาดการเชื่อมต่อ'}}</span>
+        <span class="chip" v-if="health" :class="{warn: health.disk_free < 20 * 1024 ** 3}" :title="`พื้นที่ว่างในโฟลเดอร์ดาวน์โหลด จากทั้งหมด ${size(health.disk_total)}`">ว่าง {{size(health.disk_free)}}</span>
+      </div>
+      <form class="token" v-if="!token || editingToken" @submit.prevent="saveToken">
+        <input v-model="tokenDraft" type="password" placeholder="Access token" autocomplete="current-password" aria-label="Access token">
+        <button type="submit">บันทึก</button>
+        <button type="button" class="ghost" v-if="token" @click="editingToken = false">ยกเลิก</button>
+      </form>
+      <button v-else class="ghost small" @click="editToken">เปลี่ยน token</button>
+    </header>
+
+    <section class="summary" v-if="token">
+      <button class="stat" :class="{on: jobFilter === 'running'}" @click="setFilter('running')"><b>{{counts.running}}</b><span>กำลังทำงาน</span></button>
+      <button class="stat" :class="{on: jobFilter === 'waiting'}" @click="setFilter('waiting')"><b>{{counts.waiting}}</b><span>รอคิว / หยุดไว้</span></button>
+      <button class="stat" :class="{on: jobFilter === 'done'}" @click="setFilter('done')"><b>{{counts.done}}</b><span>เสร็จแล้ว</span></button>
+      <button class="stat bad" :class="{on: jobFilter === 'failed'}" @click="setFilter('failed')"><b>{{counts.failed}}</b><span>ล้มเหลว / ยกเลิก</span></button>
+    </section>
+
+    <nav class="mobile-nav" v-if="token">
+      <button v-for="entry in [['add','เพิ่มงาน'],['queue','คิวงาน'],['files','ไฟล์']]" :key="entry[0]" :class="{on: view === entry[0]}" @click="view = entry[0]">{{entry[1]}}<em v-if="entry[0] === 'queue' && counts.running">{{counts.running}}</em></button>
+    </nav>
+
+    <div class="empty-state" v-if="!token">
+      <h2>ใส่ Access token เพื่อเริ่มใช้งาน</h2>
+      <p>token เดียวกับที่ตั้งไว้ใน <code>BILI_WEB_TOKEN</code> ตอนเปิดเซิร์ฟเวอร์</p>
+    </div>
+
+    <main class="layout" v-else>
+      <!-- Add a download -->
+      <section class="card pane-add" :class="{hide: view !== 'add'}">
+        <h2>เพิ่มงานดาวน์โหลด</h2>
+        <div class="segmented" role="tablist">
+          <button v-for="mode in [['torrent','BitTorrent'],['drive','Google Drive'],['bili','Bilibili']]" :key="mode[0]" role="tab" :aria-selected="source === mode[0]" :class="{on: source === mode[0]}" @click="source = mode[0]">{{mode[1]}}</button>
         </div>
-        <div v-if="source==='bili'">
-          <div class="field"><label>Bilibili URL</label><input v-model="biliUrl" class="transfer-url" placeholder="https://www.bilibili.com/video/BV…"></div>
-          <button @click="parseBili" :disabled="!biliUrl.trim()">อ่านรายการ</button>
-          <div class="list" v-if="episodes.length"><label class="item" v-for="episode in episodes" :key="episode.episode_id"><input type="checkbox" :value="episode.episode_id" v-model="selectedEpisodes"><span class="item-main">{{episode.title}}</span></label></div>
-          <button v-if="episodes.length" @click="submitBili" :disabled="!selectedEpisodes.length">ดาวน์โหลดที่เลือก</button>
-          <div class="note">Bilibili ต้องมี Bili23 MCP ที่เชื่อมต่อไว้; Kaggle ใหม่ที่ไม่มี Bili23 ให้ใช้ Drive หรือ BitTorrent</div>
+
+        <div v-if="source === 'torrent'" class="form">
+          <label class="field">
+            <span>Magnet link หรือ URL ของไฟล์ .torrent</span>
+            <input v-model="torrentSource" placeholder="magnet:?xt=urn:btih:…" :disabled="!!torrentData" @keyup.enter="inspectTorrent">
+          </label>
+          <div class="or">หรือ</div>
+          <label class="drop" :class="{filled: torrentFileName}">
+            <input ref="torrentInput" type="file" accept=".torrent,application/x-bittorrent" @change="chooseTorrent" :disabled="!!torrentSource.trim()">
+            <span v-if="torrentFileName">📄 {{torrentFileName}} <a href="#" @click.prevent="clearTorrentFile">ล้าง</a></span>
+            <span v-else>เลือกไฟล์ .torrent (ไม่เกิน 4 MB)</span>
+          </label>
+          <button class="wide" @click="inspectTorrent" :disabled="inspectionPending || (!torrentSource.trim() && !torrentData)">
+            <span class="spinner" v-if="inspectionPending"></span>{{inspectionPending ? 'กำลังอ่านรายการไฟล์…' : 'อ่านรายการไฟล์'}}
+          </button>
+
+          <div v-if="torrentFiles.length" class="picker">
+            <div class="picker-head">
+              <label class="check"><input type="checkbox" :checked="allTorrentSelected" :indeterminate.prop="selectedTorrent.length > 0 && !allTorrentSelected" @change="toggleAllTorrent($event.target.checked)"> เลือกทั้งหมด</label>
+              <span class="muted">{{selectedTorrent.length}} / {{torrentFiles.length}} ไฟล์ · {{size(selectedTorrentSize)}}</span>
+            </div>
+            <input v-if="torrentFiles.length > 8" v-model="torrentFilter" class="filter" placeholder="ค้นหาไฟล์…">
+            <div class="picker-list">
+              <label class="row" v-for="file in visibleTorrentFiles" :key="file.index">
+                <input type="checkbox" :value="file.index" v-model="selectedTorrent">
+                <span class="name" :title="file.path"><small v-if="dirname(file.path)">{{dirname(file.path)}}/</small>{{basename(file.path)}}</span>
+                <span class="size">{{size(file.size)}}</span>
+              </label>
+            </div>
+            <button class="wide" @click="submitTorrent" :disabled="!selectedTorrent.length">ดาวน์โหลด {{selectedTorrent.length}} ไฟล์</button>
+          </div>
+        </div>
+
+        <div v-if="source === 'drive'" class="form">
+          <label class="field">
+            <span>ลิงก์ไฟล์ Google Drive หรือ File ID</span>
+            <input v-model="driveLink" placeholder="https://drive.google.com/file/d/…/view" @keyup.enter="submitDrive">
+          </label>
+          <p class="hint">ใช้ rclone remote ที่ตั้งไว้ใน notebook · รองรับไฟล์เดี่ยว ไม่รองรับโฟลเดอร์</p>
+          <button class="wide" @click="submitDrive" :disabled="!driveLink.trim()">เพิ่มเข้าคิว</button>
+        </div>
+
+        <div v-if="source === 'bili'" class="form">
+          <label class="field">
+            <span>Bilibili URL</span>
+            <input v-model="biliUrl" placeholder="https://www.bilibili.com/video/BV…" @keyup.enter="parseBili">
+          </label>
+          <button class="wide" @click="parseBili" :disabled="!biliUrl.trim() || parsing"><span class="spinner" v-if="parsing"></span>อ่านรายการตอน</button>
+          <div v-if="episodes.length" class="picker">
+            <div class="picker-head">
+              <label class="check"><input type="checkbox" :checked="selectedEpisodes.length === episodes.length" :indeterminate.prop="selectedEpisodes.length > 0 && selectedEpisodes.length < episodes.length" @change="selectedEpisodes = $event.target.checked ? episodes.map(e => e.episode_id) : []"> เลือกทั้งหมด</label>
+              <span class="muted">{{selectedEpisodes.length}} / {{episodes.length}} ตอน</span>
+            </div>
+            <div class="picker-list">
+              <label class="row" v-for="episode in episodes" :key="episode.episode_id">
+                <input type="checkbox" :value="episode.episode_id" v-model="selectedEpisodes">
+                <span class="name">{{episode.title}}</span>
+              </label>
+            </div>
+            <button class="wide" @click="submitBili" :disabled="!selectedEpisodes.length">ดาวน์โหลด {{selectedEpisodes.length}} ตอน</button>
+          </div>
+          <p class="hint">ต้องมี Bili23 MCP ที่เชื่อมต่อไว้ ถ้า Kaggle ไม่มี Bili23 ให้ใช้ Drive หรือ BitTorrent</p>
         </div>
       </section>
-      <section v-if="tab==='files'" class="panel transfer-section">
-        <div class="panel-title"><h2>ไฟล์ที่ดาวน์โหลด</h2><div class="right"><button class="secondary" @click="loadFiles">Refresh</button><button @click="upload" :disabled="!selectedFiles.length">อัปโหลด {{selectedFiles.length}} ไฟล์</button><button class="danger" @click="deleteFiles" :disabled="!selectedFiles.length">ลบ {{selectedFiles.length}} ไฟล์</button></div></div>
-        <div class="note">อัปโหลดไฟล์ต้นฉบับโดยไม่แปลง HLS ผ่าน rclone remote ที่ตั้งใน notebook</div>
-        <div class="list"><label class="item" v-for="file in files" :key="file.path"><input type="checkbox" :value="file.path" v-model="selectedFiles"><span class="item-main"><div class="item-name">{{file.relative}}</div><div class="item-meta">{{size(file.size)}}</div></span></label><div class="empty" v-if="!files.length">ยังไม่มีไฟล์ที่ดาวน์โหลดเสร็จ</div></div>
-      </section>
-      <section v-if="tab==='queue'" class="panel transfer-section">
-        <div class="panel-title"><h2>คิวดาวน์โหลด / อัปโหลด</h2><button class="secondary" @click="loadJobs">Refresh</button></div>
-        <div class="transfer-job" v-for="job in jobs" :key="job.job"><div class="transfer-job-top"><b>{{jobLabel(job)}}</b><span>{{job.lane}} · {{job.status}} · {{job.progress||0}}%</span></div><div class="progress"><div :style="{width:(+job.progress||0)+'%'}"></div></div><div class="transfer-actions"><button class="secondary" @click="showLog(job.job)">Log</button><button v-if="['queued','running'].includes(job.status)" class="secondary" @click="pause(job.job)">Pause</button><button v-if="job.status==='paused'" @click="resume(job.job)">Resume</button><button v-if="['queued','running','paused'].includes(job.status)" class="danger" @click="cancel(job.job)">Cancel</button><button v-if="['failed','interrupted','cancelled'].includes(job.status)" @click="retry(job.job)">Retry</button></div><pre v-if="logJob===job.job">{{logText}}</pre></div>
-        <div class="empty" v-if="!jobs.length">ยังไม่มีงาน</div>
+
+      <!-- Queue and files -->
+      <section class="card pane-main" :class="{hide: view === 'add'}">
+        <div class="pane-tabs">
+          <button :class="{on: view !== 'files'}" @click="view = 'queue'">คิวงาน <em>{{visibleJobs.length}}</em></button>
+          <button :class="{on: view === 'files'}" @click="view = 'files'">ไฟล์ที่ดาวน์โหลด <em>{{files.length}}</em></button>
+        </div>
+
+        <template v-if="view !== 'files'">
+          <div class="toolbar">
+            <div class="segmented small">
+              <button v-for="entry in [['all','ทั้งหมด'],['download','ดาวน์โหลด'],['upload','อัปโหลด']]" :key="entry[0]" :class="{on: laneFilter === entry[0]}" @click="laneFilter = entry[0]">{{entry[1]}}</button>
+            </div>
+            <input v-model="jobSearch" class="filter grow" placeholder="ค้นหาชื่องาน…">
+            <button class="ghost small" v-if="jobFilter !== 'all'" @click="jobFilter = 'all'">ล้างตัวกรอง: {{filterLabel}} ✕</button>
+          </div>
+
+          <div class="jobs">
+            <article class="job" v-for="job in visibleJobs" :key="job.job" :class="['s-' + job.status, {selected: logJob === job.job}]">
+              <div class="job-head">
+                <span class="badge" :class="'s-' + job.status">{{statusLabel(job.status)}}</span>
+                <span class="kind">{{kindLabel(job)}}</span>
+                <b class="job-name" :title="job.url || job.job">{{jobLabel(job)}}</b>
+                <span class="pct" v-if="showPercent(job)">{{Math.floor(+job.progress || 0)}}%</span>
+              </div>
+              <div class="bar-track" v-if="showPercent(job) || job.status === 'running'"><div class="bar-fill" :class="{live: job.status === 'running'}" :style="{width: (+job.progress || 0) + '%'}"></div></div>
+              <div class="job-meta">
+                <span v-for="part in jobFacts(job)" :key="part">{{part}}</span>
+              </div>
+              <div class="job-error" v-if="jobError(job)">{{jobError(job)}}</div>
+              <div class="job-actions">
+                <button class="ghost small" @click="openLog(job)">Log</button>
+                <button v-if="['queued','running'].includes(job.status)" class="ghost small" @click="pause(job.job)">หยุดชั่วคราว</button>
+                <button v-if="job.status === 'paused'" class="small" @click="resume(job.job)">ทำต่อ</button>
+                <button v-if="['queued','running','paused'].includes(job.status)" class="danger small" @click="cancel(job.job)">ยกเลิก</button>
+                <button v-if="['failed','interrupted','cancelled','stopped'].includes(job.status)" class="small" @click="retry(job.job)">ลองใหม่</button>
+                <span class="job-id">{{job.job}}</span>
+              </div>
+            </article>
+            <div class="empty" v-if="!visibleJobs.length">{{jobs.length ? 'ไม่มีงานที่ตรงกับตัวกรอง' : 'ยังไม่มีงาน เพิ่มงานดาวน์โหลดได้จากแผงด้านซ้าย'}}</div>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="toolbar">
+            <label class="check"><input type="checkbox" :checked="allFilesSelected" :indeterminate.prop="selectedFiles.length > 0 && !allFilesSelected" @change="toggleAllFiles($event.target.checked)" :disabled="!visibleFiles.length"> ทั้งหมด</label>
+            <input v-model="fileSearch" class="filter grow" placeholder="ค้นหาไฟล์…">
+            <select v-model="fileSort" class="small-select" aria-label="เรียงไฟล์">
+              <option value="size">ใหญ่สุดก่อน</option>
+              <option value="modified">ใหม่สุดก่อน</option>
+              <option value="name">ชื่อ A–Z</option>
+            </select>
+            <button class="ghost small" @click="loadFiles">รีเฟรช</button>
+          </div>
+          <div class="selection" v-if="selectedFiles.length">
+            <span>เลือก {{selectedFiles.length}} ไฟล์ · {{size(selectedFilesSize)}}</span>
+            <button class="small" @click="upload">อัปโหลดไป Drive</button>
+            <button class="danger small" @click="deleteFiles">ลบจากเครื่อง</button>
+          </div>
+          <p class="hint">อัปโหลดไฟล์ต้นฉบับโดยไม่แปลง HLS ผ่าน rclone remote ที่ตั้งไว้ใน notebook</p>
+          <div class="files">
+            <label class="row" v-for="file in visibleFiles" :key="file.path">
+              <input type="checkbox" :value="file.path" v-model="selectedFiles">
+              <span class="name" :title="file.relative"><small v-if="dirname(file.relative)">{{dirname(file.relative)}}/</small>{{basename(file.relative)}}</span>
+              <span class="when" v-if="file.modified">{{ago(file.modified)}}</span>
+              <span class="size">{{size(file.size)}}</span>
+            </label>
+            <div class="empty" v-if="!visibleFiles.length">{{files.length ? 'ไม่มีไฟล์ที่ตรงกับคำค้น' : 'ยังไม่มีไฟล์ที่ดาวน์โหลดเสร็จ'}}</div>
+          </div>
+        </template>
       </section>
     </main>
+
+    <!-- Log viewer -->
+    <div class="scrim" v-if="logJob" @click="closeLog"></div>
+    <aside class="log-drawer" v-if="logJob" role="dialog" aria-label="Job log">
+      <header class="log-head">
+        <div class="log-title">
+          <span class="badge" :class="'s-' + (logJobRow?.status || 'stopped')">{{statusLabel(logJobRow?.status || 'stopped')}}</span>
+          <b :title="logJobRow?.url">{{logJobRow ? jobLabel(logJobRow) : logJob}}</b>
+          <small>{{logJob}}</small>
+        </div>
+        <button class="ghost small" @click="closeLog" aria-label="ปิด">✕</button>
+      </header>
+      <div class="log-live" v-if="logProgress">
+        <span class="live-dot" v-if="logJobRow?.status === 'running'"></span>{{logProgress}}
+      </div>
+      <div class="log-tools">
+        <label class="check"><input type="checkbox" v-model="logFollow"> ติดตามบรรทัดล่าสุด</label>
+        <label class="check"><input type="checkbox" v-model="logHideProgress"> ซ่อนบรรทัด progress</label>
+        <input v-model="logSearch" class="filter grow" placeholder="กรองบรรทัด…">
+        <button class="ghost small" @click="copyLog">คัดลอก</button>
+        <button class="ghost small" @click="downloadLog">ดาวน์โหลด</button>
+      </div>
+      <div class="log-body" ref="logBody" @scroll="onLogScroll">
+        <button class="ghost small older" v-if="logStart > 0" @click="loadOlderLog" :disabled="logLoadingOlder">{{logLoadingOlder ? 'กำลังโหลด…' : 'โหลดบรรทัดก่อนหน้า'}}</button>
+        <div class="log-note" v-if="logHiddenCount">ซ่อน {{logHiddenCount}} บรรทัด{{logSearch ? '' : ' progress'}}</div>
+        <div v-for="line in logVisible" :key="line.id" class="ln" :class="'k-' + line.kind">{{line.text}}</div>
+        <div class="log-note" v-if="!logLines.length && !logLoading">log ยังว่างอยู่</div>
+        <div class="log-note" v-if="logLoading">กำลังโหลด log…</div>
+      </div>
+      <footer class="log-foot">
+        <span>{{logLines.length}} บรรทัด · {{size(logSize)}}</span>
+        <button class="small" v-if="!logFollow" @click="jumpToEnd">ไปบรรทัดล่าสุด ↓</button>
+      </footer>
+    </aside>
+
+    <div class="toasts" aria-live="polite">
+      <div class="toast" v-for="toast in toasts" :key="toast.id" :class="toast.kind" @click="dismiss(toast.id)">{{toast.text}}</div>
+    </div>
   </div>
   <script src="/assets/vue.global.prod.js"></script>
   <script src="/assets/transfer.js"></script>
