@@ -76,9 +76,10 @@ def enqueue_upload(paths, kind, keep_local=False, parent_job=None):
     with open(config_path, "w", encoding="utf-8") as out:
         json.dump(config, out, ensure_ascii=False, indent=2)
     with open(os.path.join(JOBS_DIR, job + ".meta.json"), "w", encoding="utf-8") as out:
-        json.dump({"job": job, "kind": "upload", "upload_kind": kind, "parent_job": parent_job,
+        # config's own "kind" is the upload kind; it must not overwrite the job kind.
+        json.dump({**config, "job": job, "kind": "upload", "upload_kind": kind, "parent_job": parent_job,
                    "name": os.path.basename(paths[0]) if paths else "upload",
-                   "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()), **config},
+                   "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())},
                   out, ensure_ascii=False, indent=2)
     queue.submit(job, "upload", [sys.executable, UPLOAD_MEDIA, config_path, os.path.join(JOBS_DIR, job + ".json")])
     return job
@@ -1316,7 +1317,7 @@ class H(BaseHTTPRequestHandler):
             rows.append({
                 "job": job, "status": status,
                 "url": meta.get("url") or meta.get("source") or meta.get("name", ""),
-                "kind": meta.get("kind", "download"),
+                "kind": "upload" if meta.get("upload_kind") else meta.get("kind", "download"),
                 "lane": current["lane"] if current else meta.get("kind", "download"),
                 "progress": state.get("progress", 0),
                 "gpu": current.get("gpu") if current else state.get("gpu"),
@@ -1345,6 +1346,9 @@ class H(BaseHTTPRequestHandler):
                 meta = json.load(f)
         except (OSError, ValueError):
             return self._send(404, json.dumps({"error": "this older job has no retry metadata"}))
+        # Upload jobs saved before the meta fix carry kind "source"/"hls"; upload_kind identifies them.
+        if meta.get("upload_kind"):
+            meta["kind"] = "upload"
         if meta.get("kind") == "torrent":
             original = jobs.get(job)
             if original and original["status"] in ("queued", "running", "paused"):

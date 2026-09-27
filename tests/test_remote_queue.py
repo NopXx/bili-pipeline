@@ -115,6 +115,25 @@ class RemoteQueueTests(unittest.TestCase):
         self.assertEqual(calls[-1], ["rclone", "deletefile", "metube:tube/Movie/Movie.mkv"])
         self.assertIn("deleted remote original", Path(web.jobs[upload]["log"]).read_text())
 
+    def test_failed_upload_can_be_retried(self):
+        web = self.web
+        video = Path(os.environ["BILI_DOWNLOADS_DIR"], "Show", "E01.mkv")
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b"video")
+        job = web.enqueue_upload([str(video)], "source")
+        meta_path = Path(web.JOBS_DIR, job + ".meta.json")
+        self.assertEqual(json.loads(meta_path.read_text())["kind"], "upload")
+        # Jobs written before the fix had the upload kind clobber the job kind.
+        meta_path.write_text(json.dumps({**json.loads(meta_path.read_text()), "kind": "source"}))
+        sent = []
+        handler = web.H.__new__(web.H)
+        handler._send = lambda code, body: sent.append((code, json.loads(body)))
+        handler.handle_retry({"job": job})
+        code, body = sent[0]
+        self.assertEqual(code, 200, body)
+        retried = json.loads(Path(web.JOBS_DIR, body["job"] + ".meta.json").read_text())
+        self.assertEqual((retried["kind"], retried["upload_kind"], retried["paths"]), ("upload", "source", [str(video)]))
+
 
 if __name__ == "__main__":
     unittest.main()
