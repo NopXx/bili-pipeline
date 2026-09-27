@@ -32,6 +32,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.request
 
 import bili_pull
 
@@ -72,7 +73,14 @@ def install():
     if not PYTHON.exists():
         if sys.version_info < (3, 11):
             raise SystemExit("Bili23 needs Python 3.11 or newer")
-        subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True)
+        # Debian/Ubuntu's python3 (Kaggle's included) ships without ensurepip
+        # unless python3-venv is installed; make the venv without pip then.
+        if subprocess.run([sys.executable, "-m", "venv", str(VENV)]).returncode:
+            subprocess.run([sys.executable, "-m", "venv", "--clear", "--without-pip", str(VENV)], check=True)
+    if subprocess.run([str(PYTHON), "-m", "pip", "--version"], capture_output=True).returncode:
+        get_pip = HOME / "get-pip.py"
+        urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", get_pip)
+        subprocess.run([str(PYTHON), str(get_pip), "-q"], check=True)
     subprocess.run([str(PYTHON), "-m", "pip", "install", "-q", "-r", str(SOURCE / "requirements.txt")], check=True)
     print(f"Bili23 {REF} installed in {HOME}")
 
