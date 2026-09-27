@@ -578,6 +578,13 @@ done
 if [ "${PREP_COPY_AUDIO:-0}" = "1" ] && [[ " ${channel_list[*]} " != *" raw "* ]]; then
   if [ "$channels_set" = "1" ]; then channel_list+=(raw); else channel_list=(raw); fi
 fi
+for codec in "${a_codec[@]}"; do
+  if [ "$codec" = dts ] && [[ " ${channel_list[*]} " != *" raw "* ]]; then
+    channel_list+=(raw)
+    echo "audio policy: DTS detected — adding untouched original rendition"
+    break
+  fi
+done
 [ "${#channel_list[@]}" -gt 4 ] && { echo "PREP_AUDIO_CHANNELS takes at most 4 renditions" >&2; exit 1; }
 
 multi=0; [ "${#channel_list[@]}" -gt 1 ] && multi=1
@@ -607,10 +614,15 @@ for spec in "${channel_list[@]}"; do
   # A rendition group per layout. Apple's spec wants surround kept in its own
   # group rather than mixed in beside stereo, and a player picks per group.
   if [ "$multi" = "0" ]; then group=aud; elif [ "$spec" = "raw" ]; then group=araw; else group="a$spec"; fi
-  group_idx "$group"
-
   for i in "${!a_codec[@]}"; do
     codec=${a_codec[$i]}; channels=${a_channels[$i]}; language=${a_lang[$i]}; title=${a_title[$i]}
+    if [ "$codec" = dts ] && [ "$spec" != raw ]; then
+      echo "audio $i: dts ${channels}ch $language — skipping AAC rendition; original will be copied"
+      continue
+    fi
+    track_group=$group
+    [ "$codec" = dts ] && [ "$spec" = raw ] && track_group=arawdts
+    group_idx "$track_group"
     source_selector="0:a:$i"
     # info.json record fields, defaulted then refined per branch below.
     a_out_codec=$codec; a_reencoded=0; a_padded=0; a_actual_channels=$channels; a_kbps=0
@@ -676,7 +688,7 @@ for spec in "${channel_list[@]}"; do
       [ -n "$name" ] || name=$language
     fi
     default=$([ "$out_index" = 0 ] && echo ,default:yes || echo '')
-    map_parts+=("a:$out_index,agroup:$group,language:$language,name:$name$default")
+    map_parts+=("a:$out_index,agroup:$track_group,language:$language,name:$name$default")
     # A raw rung stays 'raw' only while it is a true bitstream copy; a late track
     # re-encoded to repair its start is no longer the untouched original.
     a_raw=0; [ "$spec" = "raw" ] && [ "$a_reencoded" = "0" ] && a_raw=1

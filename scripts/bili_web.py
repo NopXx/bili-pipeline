@@ -30,24 +30,67 @@ import threading
 import time
 from urllib.parse import parse_qs, unquote, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from job_queue import JobQueue
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PULL = os.path.join(HERE, "scripts", "pull.sh")
 BILI_PULL = os.path.join(HERE, "scripts", "bili_pull.py")
 PROCESS_MEDIA = os.path.join(HERE, "scripts", "process_media.py")
+UPLOAD_MEDIA = os.path.join(HERE, "scripts", "upload_media.py")
 TORRENT_DOWNLOAD = os.path.join(HERE, "scripts", "torrent_download.py")
 DRIVE_FILES = os.path.join(HERE, "scripts", "drive_files.mjs")
-JOBS_DIR = os.path.join(HERE, "jobs")
+DRIVE_DOWNLOAD = os.path.join(HERE, "scripts", "drive_download.mjs")
+JOBS_DIR = os.path.realpath(os.environ.get("BILI_JOBS_DIR", os.path.join(HERE, "jobs")))
 DOWNLOADS_DIR = os.path.realpath(os.environ.get("BILI_DOWNLOADS_DIR", "/opt/bili-downloads"))
 TORRENT_DOWNLOADS_DIR = os.path.realpath(os.path.join(DOWNLOADS_DIR, "torrents"))
 FRONTEND_DIR = os.path.realpath(os.path.join(HERE, "frontend"))
 TOKEN = os.environ.get("BILI_WEB_TOKEN") or ""
 HOST = os.environ.get("BILI_WEB_HOST", "127.0.0.1")  # loopback; tunnel in over SSH
 PORT = int(os.environ.get("BILI_WEB_PORT", "8787"))
+TRANSFER_ONLY = os.environ.get("BILI_TRANSFER_ONLY") == "1"
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(TORRENT_DOWNLOADS_DIR, exist_ok=True)
-jobs = {}  # job_id -> {"proc": Popen, "log": path}
+def enqueue_upload(paths, kind, keep_local=False, parent_job=None):
+    job = secrets.token_hex(8)
+    config = {"kind": kind, "paths": paths, "keep_local": bool(keep_local)}
+    config_path = os.path.join(JOBS_DIR, job + ".config.json")
+    with open(config_path, "w", encoding="utf-8") as out:
+        json.dump(config, out, ensure_ascii=False, indent=2)
+    with open(os.path.join(JOBS_DIR, job + ".meta.json"), "w", encoding="utf-8") as out:
+        json.dump({"job": job, "kind": "upload", "upload_kind": kind, "parent_job": parent_job,
+                   "name": os.path.basename(paths[0]) if paths else "upload",
+                   "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()), **config},
+                  out, ensure_ascii=False, indent=2)
+    queue.submit(job, "upload", [sys.executable, UPLOAD_MEDIA, config_path, os.path.join(JOBS_DIR, job + ".json")])
+    return job
+
+
+def on_job_complete(item, code):
+    if code or item["lane"] != "convert":
+        return
+    try:
+        with open(item["meta"], encoding="utf-8") as source:
+            meta = json.load(source)
+        if not meta.get("upload"):
+            return
+        with open(item["state"], encoding="utf-8") as source:
+            state = json.load(source)
+        outputs = state.get("outputs") or []
+        if not outputs:
+            return
+        child = enqueue_upload(outputs, "hls", meta.get("keep_local", False), item["job"])
+        queue._state(item, upload_job=child)
+        with open(item["log"], "a", encoding="utf-8") as out:
+            out.write(f"==> queued separate Drive upload job {child}\n")
+    except Exception as exc:
+        queue._state(item, upload_queue_error=str(exc))
+        with open(item["log"], "a", encoding="utf-8") as out:
+            out.write(f"==> could not queue upload: {exc}\n")
+
+
+queue = JobQueue(JOBS_DIR, on_job_complete)
+jobs = queue.jobs
 
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
@@ -420,7 +463,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        relative = "index.html" if path == "/" else path.lstrip("/")
+        relative = ("transfer.html" if TRANSFER_ONLY else "index.html") if path == "/" else path.lstrip("/")
         target = os.path.realpath(os.path.join(FRONTEND_DIR, relative))
         if target != FRONTEND_DIR and target.startswith(FRONTEND_DIR + os.sep) and os.path.isfile(target):
             with open(target, "rb") as f:
@@ -436,8 +479,11 @@ class H(BaseHTTPRequestHandler):
         "/api/pull": "handle_pull",
         "/api/torrent": "handle_torrent",
         "/api/torrent/inspect": "handle_torrent_inspect",
+        "/api/drive/download": "handle_drive_download",
         "/api/status": "handle_status",
         "/api/cancel": "handle_cancel",
+        "/api/pause": "handle_pause",
+        "/api/resume": "handle_resume",
         "/api/health": "handle_health",
         "/api/jobs": "handle_jobs",
         "/api/retry": "handle_retry",
@@ -509,22 +555,49 @@ class H(BaseHTTPRequestHandler):
                 "kind": "download",
                 "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
             }, f, ensure_ascii=False, indent=2)
-        lf = open(log_path, "w")
-        proc = subprocess.Popen(
-            ["bash", PULL, url], env=env, stdout=lf, stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        jobs[job] = {
-            "proc": proc,
-            "log": log_path,
-            "state": state_path,
-            "meta": meta_path,
-            "cancelled": False,
-        }
+        overrides = {key: env[key] for key in (
+            "BILI_EPISODE_IDS", "BILI_JOB_STATE", "BILI_DOWNLOAD_ONLY",
+            "BILI_VIDEO_QUALITY", "BILI_VIDEO_CODEC", "BILI_REDOWNLOAD",
+        ) if key in env}
+        queue.submit(job, "download", ["bash", PULL, url], overrides)
         self._send(200, json.dumps({"job": job}))
 
     def handle_torrent_inspect(self, body):
         return self.handle_torrent({**body, "inspect": True})
+
+    def handle_drive_download(self, body):
+        source = str(body.get("source") or body.get("file_id") or "").strip()
+        resource_key = str(body.get("resource_key") or "").strip()
+        if len(source) > 4096:
+            return self._send(400, json.dumps({"error": "Drive link is too long"}))
+        if source.startswith("https://"):
+            parsed = urlparse(source)
+            if parsed.hostname != "drive.google.com" or parsed.username or parsed.password or parsed.port:
+                return self._send(400, json.dumps({"error": "use a Google Drive file link or file ID"}))
+            match = re.fullmatch(r"/file/d/([A-Za-z0-9_-]+)/?(?:view|edit)?/?", parsed.path)
+            if match:
+                file_id = match.group(1)
+            elif parsed.path in ("/open", "/uc"):
+                file_id = (parse_qs(parsed.query).get("id") or [""])[0]
+            else:
+                return self._send(400, json.dumps({"error": "only individual Drive files are supported, not folders or Google Docs"}))
+            resource_key = (parse_qs(parsed.query).get("resourcekey") or [resource_key])[0]
+        else:
+            file_id = source
+        if not re.fullmatch(r"[A-Za-z0-9_-]{10,128}", file_id) or (resource_key and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", resource_key)):
+            return self._send(400, json.dumps({"error": "invalid Drive file ID or resource key"}))
+        job = secrets.token_hex(8)
+        config_path = os.path.join(JOBS_DIR, job + ".config.json")
+        state_path = os.path.join(JOBS_DIR, job + ".json")
+        config = {"file_id": file_id, "resource_key": resource_key,
+                  "destination": os.path.join(DOWNLOADS_DIR, "drive")}
+        with open(config_path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+        with open(os.path.join(JOBS_DIR, job + ".meta.json"), "w", encoding="utf-8") as handle:
+            json.dump({"job": job, "kind": "drive_download", "source": source, "resource_key": resource_key,
+                       "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}, handle)
+        queue.submit(job, "download", ["node", DRIVE_DOWNLOAD, config_path, state_path])
+        self._send(200, json.dumps({"job": job}))
 
     def handle_torrent(self, body):
         inspecting = body.get("inspect") is True
@@ -604,20 +677,17 @@ class H(BaseHTTPRequestHandler):
         }
         with open(meta_path, "w", encoding="utf-8") as handle:
             json.dump(meta, handle, ensure_ascii=False, indent=2)
-        lf = open(log_path, "w")
         command = [sys.executable, TORRENT_DOWNLOAD, source_arg, destination, state_path]
         if inspecting:
             command.insert(2, "--inspect")
         elif selected:
             command.append(",".join(map(str, sorted(set(selected)))))
-        proc = subprocess.Popen(
-            command,
-            env={**os.environ}, stdout=lf, stderr=subprocess.STDOUT, start_new_session=True,
-        )
-        jobs[job] = {"proc": proc, "log": log_path, "state": state_path, "meta": meta_path, "cancelled": False}
+        queue.submit(job, "download", command)
         self._send(200, json.dumps({"job": job}))
 
     def handle_process(self, body):
+        if TRANSFER_ONLY:
+            return self._send(403, json.dumps({"error": "HLS conversion is disabled in transfer-only mode"}))
         files = [str(item) for item in (body.get("files") or []) if item]
         if not files:
             return self._send(400, json.dumps({"error": "no files selected"}))
@@ -645,19 +715,11 @@ class H(BaseHTTPRequestHandler):
             json.dump({"phase": "queued", "status": "queued", "files": config["files"]}, f, ensure_ascii=False, indent=2)
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump({"job": job, "kind": "hls", "created": created, **config}, f, ensure_ascii=False, indent=2)
-        lf = open(log_path, "w")
-        proc = subprocess.Popen(
-            [sys.executable, PROCESS_MEDIA, config_path, state_path],
-            env={**os.environ}, stdout=lf, stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        jobs[job] = {"proc": proc, "log": log_path, "state": state_path, "meta": meta_path, "cancelled": False}
+        queue.submit(job, "convert", [sys.executable, PROCESS_MEDIA, config_path, state_path])
         self._send(200, json.dumps({"job": job}))
 
     def handle_upload(self, body):
-        # Upload the original files to Drive without any HLS conversion. Reuses the
-        # process_media worker (upload_source branch) so jobs/status/cancel/progress
-        # all behave exactly like a convert job.
+        # Original-file transfers use the same independent upload lane as HLS.
         files = [str(item) for item in (body.get("files") or []) if item]
         if not files:
             return self._send(400, json.dumps({"error": "no files selected"}))
@@ -665,30 +727,7 @@ class H(BaseHTTPRequestHandler):
             resolved = os.path.realpath(path)
             if not resolved.startswith(DOWNLOADS_DIR + os.sep) or not os.path.isfile(resolved):
                 return self._send(400, json.dumps({"error": f"invalid downloaded file: {path}"}))
-        config = {
-            "files": [os.path.realpath(path) for path in files],
-            "upload_source": True,
-            "upload": True,
-        }
-        job = secrets.token_hex(8)
-        log_path = os.path.join(JOBS_DIR, job + ".log")
-        state_path = os.path.join(JOBS_DIR, job + ".json")
-        meta_path = os.path.join(JOBS_DIR, job + ".meta.json")
-        config_path = os.path.join(JOBS_DIR, job + ".config.json")
-        created = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump({"phase": "queued", "status": "queued", "files": config["files"]}, f, ensure_ascii=False, indent=2)
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump({"job": job, "kind": "upload", "created": created, **config}, f, ensure_ascii=False, indent=2)
-        lf = open(log_path, "w")
-        proc = subprocess.Popen(
-            [sys.executable, PROCESS_MEDIA, config_path, state_path],
-            env={**os.environ}, stdout=lf, stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        jobs[job] = {"proc": proc, "log": log_path, "state": state_path, "meta": meta_path, "cancelled": False}
+        job = enqueue_upload([os.path.realpath(path) for path in files], "source")
         self._send(200, json.dumps({"job": job}))
 
     def handle_status(self, body):
@@ -713,7 +752,7 @@ class H(BaseHTTPRequestHandler):
                 "running": False, "log": text, "cancelled": cancelled,
                 "exit_code": None, "state": state,
             }))
-        running = j["proc"].poll() is None
+        running = j["status"] in ("queued", "running", "paused")
         try:
             with open(j["log"], errors="replace") as f:
                 text = f.read()[-8000:]
@@ -725,65 +764,74 @@ class H(BaseHTTPRequestHandler):
                 state = json.load(f)
         except (OSError, ValueError):
             pass
+        if j["status"] in ("queued", "paused", "interrupted", "cancelled"):
+            state["status"] = j["status"]
+            state["phase"] = j["status"]
+        state["lane"] = j["lane"]
         self._send(200, json.dumps({
             "running": running,
             "log": text,
             "cancelled": j.get("cancelled", False),
-            "exit_code": j["proc"].poll(),
+            "exit_code": j["proc"].poll() if j["proc"] is not None else None,
             "state": state,
         }))
 
+    def _bili_tasks(self, item, action):
+        try:
+            with open(item["meta"], encoding="utf-8") as source:
+                meta = json.load(source)
+            if meta.get("kind") != "download":
+                return
+            with open(item["state"], encoding="utf-8") as source:
+                task_ids = json.load(source).get("task_ids") or []
+        except (OSError, ValueError):
+            task_ids = []
+        if not task_ids:
+            if action == "cancel":
+                return
+            raise RuntimeError("Bili23 task IDs are not ready yet; try again shortly")
+        result = subprocess.run(
+            [sys.executable, BILI_PULL, f"--{action}", *task_ids],
+            env=os.environ, capture_output=True, text=True, timeout=45,
+        )
+        if result.returncode:
+            raise RuntimeError((result.stderr or result.stdout or f"Bili23 {action} failed").strip()[-800:])
+
+    def handle_pause(self, body):
+        job = str(body.get("job") or "")
+        if job not in jobs:
+            return self._send(404, json.dumps({"error": "unknown job"}))
+        try:
+            item = queue.pause(job, before_pause=lambda item: self._bili_tasks(item, "pause"))
+        except (ValueError, RuntimeError) as exc:
+            return self._send(409, json.dumps({"error": str(exc)}))
+        self._send(200, json.dumps({"job": job, "status": item["status"]}))
+
+    def handle_resume(self, body):
+        job = str(body.get("job") or "")
+        if job not in jobs:
+            return self._send(404, json.dumps({"error": "unknown job"}))
+        try:
+            item = queue.resume(job, before_resume=lambda item: self._bili_tasks(item, "resume"))
+        except (ValueError, RuntimeError) as exc:
+            return self._send(409, json.dumps({"error": str(exc)}))
+        self._send(200, json.dumps({"job": job, "status": item["status"]}))
+
     def handle_cancel(self, body):
         job = body.get("job") or ""
-        j = jobs.get(job)
-        if not j:
+        if job not in jobs:
             return self._send(404, json.dumps({"error": "unknown job"}))
-
-        task_ids = []
-        try:
-            with open(j["state"], encoding="utf-8") as f:
-                task_ids = json.load(f).get("task_ids") or []
-        except (OSError, ValueError):
-            pass
-
-        cancel_log = ""
-        if task_ids:
-            result = subprocess.run(
-                [sys.executable, BILI_PULL, "--cancel", *task_ids],
-                env=os.environ,
-                capture_output=True,
-                text=True,
-                timeout=45,
-            )
-            cancel_log = (result.stderr or result.stdout).strip()
-
-        proc = j["proc"]
-        if proc.poll() is None:
+        def cancel_external(item):
             try:
-                os.killpg(proc.pid, signal.SIGTERM)
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-        j["cancelled"] = True
+                self._bili_tasks(item, "cancel")
+            except RuntimeError as exc:
+                with open(item["log"], "a", encoding="utf-8") as out:
+                    out.write(f"Bili23 cancellation warning: {exc}\n")
         try:
-            with open(j["state"], encoding="utf-8") as f:
-                cancelled_state = json.load(f)
-        except (OSError, ValueError):
-            cancelled_state = {}
-        cancelled_state.update({"phase": "cancelled", "status": "cancelled"})
-        try:
-            with open(j["state"], "w", encoding="utf-8") as f:
-                json.dump(cancelled_state, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
-        with open(j["log"], "a", encoding="utf-8") as f:
-            f.write("\n==> CANCELLED BY USER\n")
-            if cancel_log:
-                f.write(cancel_log + "\n")
-        with open(j["log"], errors="replace") as f:
+            item = queue.cancel(job, before_cancel=cancel_external)
+        except (ValueError, RuntimeError) as exc:
+            return self._send(409, json.dumps({"error": str(exc)}))
+        with open(item["log"], errors="replace") as f:
             text = f.read()[-8000:]
         self._send(200, json.dumps({"cancelled": True, "log": text}))
 
@@ -798,12 +846,13 @@ class H(BaseHTTPRequestHandler):
         except (OSError, subprocess.TimeoutExpired):
             bili23 = "unknown"
         usage = shutil.disk_usage(DOWNLOADS_DIR)
-        active = sum(1 for item in jobs.values() if item["proc"].poll() is None)
+        active = sum(1 for item in jobs.values() if item["status"] == "running")
         self._send(200, json.dumps({
             "bili23": bili23,
             "disk_total": usage.total,
             "disk_free": usage.free,
             "active_jobs": active,
+            "transfer_only": TRANSFER_ONLY,
         }))
 
     def handle_probe(self, body):
@@ -893,7 +942,7 @@ class H(BaseHTTPRequestHandler):
             except (OSError, ValueError):
                 pass
             current = jobs.get(job)
-            running = bool(current and current["proc"].poll() is None)
+            running = bool(current and current["status"] == "running")
             try:
                 with open(log_path, errors="replace") as f:
                     tail = f.read()[-4000:]
@@ -907,8 +956,8 @@ class H(BaseHTTPRequestHandler):
                     state = json.load(f)
             except (OSError, ValueError):
                 pass
-            if running:
-                status = "running"
+            if current:
+                status = current["status"]
             elif state.get("status") in ("downloaded", "completed", "failed", "cancelled"):
                 status = state["status"]
             elif "CANCELLED BY USER" in tail:
@@ -923,11 +972,14 @@ class H(BaseHTTPRequestHandler):
                 "job": job, "status": status,
                 "url": meta.get("url") or meta.get("source") or meta.get("name", ""),
                 "kind": meta.get("kind", "download"),
+                "lane": current["lane"] if current else meta.get("kind", "download"),
+                "progress": state.get("progress", 0),
+                "parent_job": meta.get("parent_job"),
                 "created": meta.get("created", time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(modified))),
                 "log_size": size, "modified": modified,
             })
-        rows.sort(key=lambda row: row["modified"], reverse=True)
-        self._send(200, json.dumps(rows[:30]))
+        rows.sort(key=lambda row: (row["status"] in ("running", "queued", "paused"), row["modified"]), reverse=True)
+        self._send(200, json.dumps(rows[:100]))
 
     def handle_retry(self, body):
         job = body.get("job") or ""
@@ -951,6 +1003,17 @@ class H(BaseHTTPRequestHandler):
                     retry_body["selected_files"] = meta["selected_files"]
                 return self.handle_torrent(retry_body)
             return self._send(404, json.dumps({"error": "ไม่พบไฟล์ .torrent เดิมสำหรับ retry"}))
+        if meta.get("kind") == "hls":
+            return self.handle_process(meta)
+        if meta.get("kind") == "drive_download":
+            return self.handle_drive_download({"source": meta.get("source"), "resource_key": meta.get("resource_key")})
+        if meta.get("kind") == "upload":
+            try:
+                new_job = enqueue_upload(meta.get("paths") or [], meta.get("upload_kind") or "source",
+                                         meta.get("keep_local", False), meta.get("parent_job"))
+            except (ValueError, OSError) as exc:
+                return self._send(400, json.dumps({"error": str(exc)}))
+            return self._send(200, json.dumps({"job": new_job}))
         return self.handle_pull(meta)
 
     # ---- Files tab ----
@@ -961,6 +1024,8 @@ class H(BaseHTTPRequestHandler):
             for n in names:
                 p = os.path.join(root, n)
                 if n.endswith(".aria2") or os.path.exists(p + ".aria2"):
+                    continue
+                if root.startswith(os.path.join(DOWNLOADS_DIR, "drive") + os.sep) and n.endswith(".part"):
                     continue
                 try:
                     out.append({"path": p, "relative": os.path.relpath(p, DOWNLOADS_DIR), "size": os.path.getsize(p)})
@@ -1012,6 +1077,7 @@ def main():
     if not TOKEN:
         sys.exit("set BILI_WEB_TOKEN")
     srv = ThreadingHTTPServer((HOST, PORT), H)
+    threading.Thread(target=queue.run, name="bili-job-queue", daemon=True).start()
     print(f"bili-web on {HOST}:{PORT}", flush=True)
     srv.serve_forever()
 

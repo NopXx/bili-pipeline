@@ -246,39 +246,24 @@ def main():
             raise
         return
 
-    upload = bool(config.get("upload", True))
-    keep_local = bool(config.get("keep_local", False))
-    update_state(state_path, phase="validating", status="running", files=[str(x) for x in files])
+    # Conversion and Drive transfer are separate queue lanes. Keep every HLS
+    # bundle until the upload worker confirms transfer (or the user removes it).
+    job_id = config_path.name.split(".", 1)[0]
+    parent = HLS_ROOT / job_id
+    parent.mkdir(parents=True, exist_ok=True)
+    outputs = []
+    update_state(state_path, phase="validating", status="running", files=[str(x) for x in files], outputs=[])
     try:
         for index, source in enumerate(files, 1):
             total = validate(source)
             print(f"==> [{index}/{len(files)}] preparing HLS: {source.name}", flush=True)
-            if upload and not keep_local:
-                context = tempfile.TemporaryDirectory(prefix="bili-hls-")
-                parent = Path(context.name)
-            else:
-                context = None
-                HLS_ROOT.mkdir(parents=True, exist_ok=True)
-                parent = HLS_ROOT
             output = parent / source.stem.rstrip(" .")
             update_state(state_path, phase="hls", current_file=str(source), progress=0, eta_seconds=None)
             run_with_progress(["bash", str(PREP), str(source), str(output)], env, total, "HLS", state_path)
-            if upload:
-                update_state(state_path, phase="upload", progress=0, eta_seconds=None)
-                print(f"==> uploading: {source.stem}", flush=True)
-                if RCLONE_REMOTE:
-                    run_with_progress(["rclone", "copy", str(output), f"{RCLONE_REMOTE}/{output.name}",
-                                       "--stats=5s", "--stats-one-line", "--stats-log-level", "NOTICE"],
-                                      env, 0, "UPLOAD", state_path)
-                else:
-                    folder_id = env.get("DRIVE_FOLDER_ID")
-                    if not folder_id:
-                        raise RuntimeError("DRIVE_FOLDER_ID is not configured")
-                    run_with_progress(["node", str(PUSH), str(output), folder_id], env, 0, "UPLOAD", state_path)
-            if context:
-                context.cleanup()
-        update_state(state_path, phase="completed", status="completed", progress=100)
-        print("==> all selected files completed", flush=True)
+            outputs.append(str(output.resolve()))
+            update_state(state_path, outputs=outputs)
+        update_state(state_path, phase="converted", status="completed", progress=100, outputs=outputs, eta_seconds=None)
+        print("==> HLS conversion completed; upload is a separate queued job", flush=True)
     except Exception as exc:
         update_state(state_path, phase="failed", status="failed", error=str(exc))
         raise

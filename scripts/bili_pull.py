@@ -46,17 +46,23 @@ def fmt_bytes(value):
         value /= 1024
 
 
-def cancel_tasks(task_ids):
+def control_tasks(action, task_ids):
+    if action not in ("cancel", "pause", "resume"):
+        raise ValueError("invalid task action")
     port, token = load_endpoint()
     failed = 0
     for tid in task_ids:
         try:
-            call(port, token, "cancel_task", {"task_id": tid})
-            log(f"cancelled task {tid}")
+            call(port, token, f"{action}_task", {"task_id": tid})
+            log(f"{action} task {tid}")
         except SystemExit as exc:
             failed += 1
-            log(f"could not cancel task {tid}: {exc}")
+            log(f"could not {action} task {tid}: {exc}")
     return failed
+
+
+def cancel_tasks(task_ids):
+    return control_tasks("cancel", task_ids)
 
 
 def find_config():
@@ -154,6 +160,8 @@ def build_options():
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "--cancel":
         raise SystemExit(cancel_tasks(sys.argv[2:]))
+    if len(sys.argv) >= 3 and sys.argv[1] in ("--pause", "--resume"):
+        raise SystemExit(control_tasks(sys.argv[1][2:], sys.argv[2:]))
     if len(sys.argv) < 2:
         sys.exit("usage: bili_pull.py <bilibili-url-or-id>")
     url = sys.argv[1]
