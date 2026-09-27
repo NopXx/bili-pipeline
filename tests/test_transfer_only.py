@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import json
 import os
@@ -50,6 +51,10 @@ class TransferOnlyTests(unittest.TestCase):
                 self.assertEqual(failure.exception.code, 403)
                 job = post("/api/upload", {"files": [str(source)]})["job"]
                 self.assertEqual(web.jobs[job]["lane"], "upload")
+                inspection = post("/api/torrent/inspect", {
+                    "torrent_data": base64.b64encode(b"d3:foo3:bare").decode()
+                })["job"]
+                self.assertEqual(web.jobs[inspection]["lane"], "inspect")
             finally:
                 server.shutdown()
                 server.server_close()

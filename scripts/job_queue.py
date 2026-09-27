@@ -9,12 +9,22 @@ import threading
 import time
 
 
-LANES = ("download", "convert", "upload")
+LANES = ("inspect", "download", "convert", "upload")
 ACTIVE = {"queued", "running", "paused"}
 
 
 class JobQueue:
-    def __init__(self, jobs_dir, on_complete=None):
+    def __init__(self, jobs_dir, on_complete=None, download_concurrency=None):
+        if download_concurrency is None:
+            download_concurrency = os.environ.get("BILI_DOWNLOAD_CONCURRENCY", "2")
+        try:
+            download_concurrency = int(download_concurrency)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("download concurrency must be an integer from 1 to 8") from exc
+        if not 1 <= download_concurrency <= 8:
+            raise ValueError("download concurrency must be an integer from 1 to 8")
+        self.limits = {lane: 1 for lane in LANES}
+        self.limits["download"] = download_concurrency
         self.root = Path(jobs_dir)
         self.root.mkdir(parents=True, exist_ok=True)
         self.on_complete = on_complete
@@ -138,8 +148,8 @@ class JobQueue:
             if item["proc"] is None:
                 item["status"] = "queued"
             else:
-                if any(other is not item and other["lane"] == item["lane"] and other["status"] == "running"
-                       for other in self.jobs.values()):
+                if sum(other is not item and other["lane"] == item["lane"] and other["status"] == "running"
+                       for other in self.jobs.values()) >= self.limits[item["lane"]]:
                     raise ValueError("queue lane is busy; resume after the current job finishes")
                 if before_resume:
                     before_resume(item)
@@ -185,33 +195,35 @@ class JobQueue:
                 self._persist(item)
                 completed.append((item, code))
             for lane in LANES:
-                active = any(item["lane"] == lane and item["status"] == "running" for item in self.jobs.values())
-                if active:
+                active = sum(item["lane"] == lane and item["status"] == "running" for item in self.jobs.values())
+                slots = self.limits[lane] - active
+                if slots <= 0:
                     continue
                 pending = sorted(
                     (item for item in self.jobs.values() if item["lane"] == lane and item["status"] == "queued"),
                     key=lambda item: item["created_at"],
                 )
-                if not pending:
-                    continue
-                item = pending[0]
-                try:
-                    log = open(item["log"], "a", encoding="utf-8")
+                for item in pending:
+                    if slots <= 0:
+                        break
                     try:
-                        proc = subprocess.Popen(
-                            item["command"], env={**os.environ, **item["env_overrides"], "BILI_QUEUE_JOB_ID": item["job"]},
-                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                        )
-                    finally:
-                        log.close()
-                    item["proc"] = proc
-                    item["status"] = "running"
-                    self._state(item, status="running", phase=lane)
-                    self._persist(item)
-                except Exception as exc:
-                    item["status"] = "failed"
-                    self._state(item, status="failed", phase="failed", error=str(exc))
-                    self._persist(item)
+                        log = open(item["log"], "a", encoding="utf-8")
+                        try:
+                            proc = subprocess.Popen(
+                                item["command"], env={**os.environ, **item["env_overrides"], "BILI_QUEUE_JOB_ID": item["job"]},
+                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                            )
+                        finally:
+                            log.close()
+                        item["proc"] = proc
+                        item["status"] = "running"
+                        self._state(item, status="running", phase=lane)
+                        self._persist(item)
+                        slots -= 1
+                    except Exception as exc:
+                        item["status"] = "failed"
+                        self._state(item, status="failed", phase="failed", error=str(exc))
+                        self._persist(item)
         for item, code in completed:
             if self.on_complete:
                 self.on_complete(item, code)

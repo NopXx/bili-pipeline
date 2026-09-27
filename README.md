@@ -8,7 +8,7 @@ Self-hosted pipeline that downloads video, converts it to browser-playable HLS, 
 2. **Convert to HLS** — `public/prep-hls.sh` builds an fMP4 HLS bundle: video copy or re-encode (incl. HDR tonemap / preserve / ladder), per-language audio renditions, WebVTT subtitles, poster, and a `schemaVersion 2` `*.info.json` manifest (`public/write-info-json.py`).
 3. **Upload to Drive** — each bundle (`drive_push.mjs`) or an original pre-HLS video (`drive_upload.mjs`, resumable) lands in its own Drive sub-folder, which the library treats as one series.
 
-Long-running work runs in three independent, one-at-a-time queues: download, HLS conversion, and Drive upload. A successful conversion enqueues a separate upload job, so upload can be paused while conversion continues. The UI shows all three lanes with progress and per-job controls.
+Long-running work runs in independent queues: torrent inspection, download, HLS conversion, and Drive upload. Up to two downloads run concurrently by default; set `BILI_DOWNLOAD_CONCURRENCY` to an integer from 1 to 8 to change this. Inspection can read the next torrent's file list while downloads are active. A successful conversion enqueues a separate upload job, so upload can be paused while conversion continues. The UI shows the download, conversion, and upload lanes with progress and per-job controls.
 
 ## Layout
 

@@ -682,7 +682,7 @@ class H(BaseHTTPRequestHandler):
             command.insert(2, "--inspect")
         elif selected:
             command.append(",".join(map(str, sorted(set(selected)))))
-        queue.submit(job, "download", command)
+        queue.submit(job, "inspect" if inspecting else "download", command)
         self._send(200, json.dumps({"job": job}))
 
     def handle_process(self, body):
