@@ -156,7 +156,7 @@
                   <label class="check"><input type="checkbox" v-model="torrentUpload.upload"> อัปโหลดวิดีโอขึ้น Drive อัตโนมัติเมื่อโหลดเสร็จ</label>
                   <label class="check" v-if="torrentUpload.upload"><input type="checkbox" v-model="torrentUpload.removeLocal"> ลบไฟล์ในเครื่องทีละไฟล์หลังอัปโหลดสำเร็จ</label>
                 </div>
-                <p class="hint" v-if="torrentUpload.upload">ไฟล์วิดีโอแต่ละไฟล์ไปอยู่ในโฟลเดอร์ของตัวเองบน Drive แล้วเปิด “คลัง Drive” บนเครื่องที่มี GPU เพื่อแปลงต่อ</p>
+                <p class="hint" v-if="torrentUpload.upload">หนังไฟล์เดียว: ไปอยู่ในโฟลเดอร์ของตัวเองบน Drive · ซีรีส์ (หลายไฟล์): เก็บโครงโฟลเดอร์ของ torrent เช่น ชื่อเรื่อง/ซีซัน/ตอน.mkv แล้วเปิด “คลัง Drive” บนเครื่องที่มี GPU เลือกทั้งโฟลเดอร์ซีซันเพื่อแปลงต่อ</p>
                 <button class="wide" @click="submitTorrent" :disabled="!selectedTorrent.length">ดาวน์โหลด {{selectedTorrent.length}} ไฟล์{{torrentUpload.upload ? ' แล้วอัปโหลด' : ''}}</button>
               </div>
               <p class="hint">ดาวน์โหลดต่อได้ถ้าสะดุด ใช้ DHT/PEX และหยุด seed ทันทีเมื่อโหลดครบ</p>
@@ -224,7 +224,7 @@
                   </div>
                 </article>
               </div>
-              <p class="hint">แต่ละไฟล์เป็นงานของตัวเอง: ดาวน์โหลด (ตรวจ header ก่อน, ffprobe หลัง) → แปลง HLS ตามค่าด้านขวา → อัปโหลดไว้ข้างต้นฉบับ</p>
+              <p class="hint">แต่ละไฟล์เป็นงานของตัวเอง: ดาวน์โหลด (ตรวจ header ก่อน, ffprobe หลัง) → แปลง HLS ตามค่าด้านขวา → อัปโหลดไว้ข้างต้นฉบับ (ตอน.mkv ได้โฟลเดอร์ ตอน/ อยู่ข้างกัน)</p>
             </div>
           </section>
 

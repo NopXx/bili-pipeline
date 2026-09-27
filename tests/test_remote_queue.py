@@ -117,12 +117,6 @@ class RemoteQueueTests(unittest.TestCase):
 
     def test_torrent_auto_upload_queues_source_upload_that_removes_files(self):
         web = self.web
-        folder = Path(web.TORRENT_DOWNLOADS_DIR, "Show-abc123")
-        folder.mkdir(parents=True)
-        videos = [folder / "E01.mkv", folder / "E02.mkv"]
-        for video in videos:
-            video.write_bytes(b"video")
-        (folder / "info.nfo").write_text("x")
         sent = []
         handler = web.H.__new__(web.H)
         handler._send = lambda code, body: sent.append((code, json.loads(body)))
@@ -134,6 +128,14 @@ class RemoteQueueTests(unittest.TestCase):
         meta = json.loads(Path(web.JOBS_DIR, job + ".meta.json").read_text())
         self.assertEqual(meta["pipeline"], {"upload_source": True, "remove_local": True})
 
+        # aria2 saved a folderless two-episode torrent into the job's destination.
+        folder = Path(meta["destination"])
+        folder.mkdir(parents=True)
+        videos = [folder / "E01.mkv", folder / "E02.mkv"]
+        for video in videos:
+            video.write_bytes(b"video")
+        (folder / "info.nfo").write_text("x")
+
         item = {"job": job, "lane": "download", "meta": str(Path(web.JOBS_DIR, job + ".meta.json")),
                 "state": str(Path(web.JOBS_DIR, job + ".json")), "log": str(Path(web.JOBS_DIR, job + ".log"))}
         Path(item["state"]).write_text(json.dumps({"video_files": [str(v) for v in videos]}))
@@ -142,17 +144,47 @@ class RemoteQueueTests(unittest.TestCase):
         upload = state.call_args.kwargs["upload_job"]
         config = json.loads(Path(web.JOBS_DIR, upload + ".config.json").read_text())
         self.assertEqual((config["kind"], config["paths"], config["remove_source"]), ("source", [str(v) for v in videos], True))
+        # Several videos without a torrent folder: one Drive folder named after the torrent.
+        self.assertEqual(config["remote_dirs"], [meta["name"]] * 2)
 
         # upload_media deletes each video only after its own upload succeeded.
         state_path = Path(web.JOBS_DIR, upload + ".json")
         state_path.write_text("{}")
         import upload_media
         uploaded = []
-        with patch.object(upload_media, "DOWNLOADS", Path(os.environ["BILI_DOWNLOADS_DIR"]).resolve()),              patch.object(upload_media, "RCLONE_REMOTE", "metube:tube"),              patch.object(upload_media, "run_with_progress", lambda command, *rest: uploaded.append((command[2], Path(command[2]).exists()))),              patch.object(sys, "argv", ["upload_media.py", str(Path(web.JOBS_DIR, upload + ".config.json")), str(state_path)]):
+        with patch.object(upload_media, "DOWNLOADS", Path(os.environ["BILI_DOWNLOADS_DIR"]).resolve()),              patch.object(upload_media, "RCLONE_REMOTE", "metube:tube"),              patch.object(upload_media, "run_with_progress", lambda command, *rest: uploaded.append((command[2], Path(command[2]).exists(), command[3]))),              patch.object(sys, "argv", ["upload_media.py", str(Path(web.JOBS_DIR, upload + ".config.json")), str(state_path)]):
             upload_media.main()
-        self.assertEqual(uploaded, [(str(v), True) for v in videos])
+        self.assertEqual(uploaded, [(str(v), True, f"metube:tube/{meta['name']}/{v.name}") for v in videos])
         self.assertEqual([v.exists() for v in videos], [False, False])
         self.assertTrue((folder / "info.nfo").exists())
+
+    def test_series_keep_their_folders_on_drive(self):
+        web = self.web
+        # HLS bundle goes next to the original, wherever it is.
+        self.assertEqual(web.hls_remote_dir("Movie/Movie.mkv", "Movie"), "Movie")
+        self.assertEqual(web.hls_remote_dir("Show/S1/E01.mkv", "E01"), "Show/S1/E01")
+        self.assertEqual(web.hls_remote_dir("E01.mkv", "E01"), "E01")
+        # Torrent videos keep the torrent's folders; a folderless torrent gets one named after it.
+        destination = os.path.realpath(web.TORRENT_DOWNLOADS_DIR + "/Show-abc123")
+        self.assertEqual(web.torrent_remote_dir(destination + "/Show/S1/E01.mkv", destination, "Show"), "Show/S1")
+        self.assertEqual(web.torrent_remote_dir(destination + "/E01.mkv", destination, "Show"), "Show")
+
+        # A converted episode uploads into Show/S1/E01 and that is where the playlist is checked.
+        bundle = Path(os.environ["BILI_HLS_DIR"], "job", "E01")
+        meta = {"upload": True, "pipeline": {"remote_source": "Show/S1/E01.mkv"}}
+        item = {"job": "c" * 16, "lane": "convert", "meta": str(Path(web.JOBS_DIR, "c.meta.json")),
+                "state": str(Path(web.JOBS_DIR, "c.json")), "log": str(Path(web.JOBS_DIR, "c.log"))}
+        Path(item["meta"]).write_text(json.dumps(meta))
+        Path(item["state"]).write_text(json.dumps({"outputs": [str(bundle)]}))
+        with patch.object(web.queue, "submit"), patch.object(web.queue, "_state") as state:
+            web.on_convert_complete(item, 0)
+        upload = state.call_args.kwargs["upload_job"]
+        config = json.loads(Path(web.JOBS_DIR, upload + ".config.json").read_text())
+        self.assertEqual(config["remote_dirs"], ["Show/S1/E01"])
+        calls = []
+        with patch.object(web.subprocess, "run", lambda command, **kw: calls.append(command) or subprocess.CompletedProcess(command, 0, "", "")):
+            web.finish_remote_pipeline(item, {"remote_source": "Show/S1/E01.mkv", "delete_remote_source": True}, [str(bundle)], ["Show/S1/E01"])
+        self.assertEqual(calls[0][2], "metube:tube/Show/S1/E01")
 
     def test_pages_pin_assets_to_their_content(self):
         web = self.web

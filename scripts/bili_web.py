@@ -21,6 +21,7 @@ import html
 import json
 import mimetypes
 import os
+import posixpath
 import re
 import secrets
 import shutil
@@ -70,11 +71,17 @@ JOB_DETAIL_KEYS = ("phase", "error", "exit_code", "speed", "eta", "done", "total
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(TORRENT_DOWNLOADS_DIR, exist_ok=True)
-def enqueue_upload(paths, kind, keep_local=False, parent_job=None, remove_source=False):
+def enqueue_upload(paths, kind, keep_local=False, parent_job=None, remove_source=False, remote_dirs=None):
     job = secrets.token_hex(8)
     # remove_source: delete each source file once its own upload succeeded
     # (auto-upload after a torrent, to keep a small disk from filling up).
+    # remote_dirs: per path, the folder under BILI_RCLONE_REMOTE it goes to
+    # (a series keeps its folders); None keeps the one-folder-per-file layout.
     config = {"kind": kind, "paths": paths, "keep_local": bool(keep_local), "remove_source": bool(remove_source)}
+    if remote_dirs is not None:
+        if len(remote_dirs) != len(paths):
+            raise ValueError("remote_dirs must match paths")
+        config["remote_dirs"] = [remote_relative(value) for value in remote_dirs]
     config_path = os.path.join(JOBS_DIR, job + ".config.json")
     with open(config_path, "w", encoding="utf-8") as out:
         json.dump(config, out, ensure_ascii=False, indent=2)
@@ -215,6 +222,22 @@ def remote_spec(relative):
     return f"{RCLONE_REMOTE}/{relative}" if relative else RCLONE_REMOTE
 
 
+def torrent_remote_dir(path, destination, label):
+    """Drive folder for one video of a multi-video torrent: its folder inside
+    the torrent, or a folder named after the torrent when it has none."""
+    relative = os.path.relpath(os.path.dirname(os.path.realpath(path)), destination).replace(os.sep, "/")
+    return label if relative == "." else relative
+
+
+def hls_remote_dir(remote_source, bundle):
+    """Where a converted bundle goes: next to its Drive original. An original
+    that already sits in a folder of its own name ("Movie/Movie.mkv") gets
+    the bundle in that folder; one among others ("Show/S1/E01.mkv") gets a
+    sibling folder ("Show/S1/E01")."""
+    parent = posixpath.dirname(remote_relative(remote_source))
+    return parent if posixpath.basename(parent) == bundle else posixpath.join(parent, bundle)
+
+
 def enqueue_remote_download(relative, pipeline):
     """One Drive-queue item: download (remote_fetch.py), then per `pipeline`
     convert, upload and optionally delete the remote original."""
@@ -247,7 +270,7 @@ def append_log(item, message):
         out.write(f"==> {message}\n")
 
 
-def finish_remote_pipeline(upload_item, pipeline, bundles):
+def finish_remote_pipeline(upload_item, pipeline, bundles, remote_dirs=None):
     """After a Drive-queue item's HLS upload: remove the local original and,
     when asked, delete the remote original — but only once each uploaded
     bundle's playlist is visible on the remote."""
@@ -264,8 +287,8 @@ def finish_remote_pipeline(upload_item, pipeline, bundles):
     source = pipeline.get("remote_source")
     if not (pipeline.get("delete_remote_source") and source and RCLONE_REMOTE):
         return
-    for bundle in bundles:
-        name = os.path.basename(str(bundle).rstrip("/"))
+    for index, bundle in enumerate(bundles):
+        name = remote_dirs[index] if remote_dirs else os.path.basename(str(bundle).rstrip("/"))
         listing = subprocess.run(["rclone", "lsf", remote_spec(name), "--include", "*.m3u8"],
                                  capture_output=True, text=True, timeout=120)
         if listing.returncode or not listing.stdout.strip():
@@ -301,8 +324,15 @@ def on_job_complete(item, code):
         if not files:
             append_log(item, "auto-upload skipped: no video files downloaded")
             return
+        # Several videos (a series): keep the torrent's folders on Drive, so
+        # a season is one folder to select from. One video: its own folder.
+        destination = os.path.realpath(meta.get("destination") or "")
+        remote_dirs = None
+        if len(files) > 1 and destination:
+            remote_dirs = [torrent_remote_dir(path, destination, meta.get("name") or item["job"]) for path in files]
         try:
-            child = enqueue_upload(files, "source", parent_job=item["job"], remove_source=pipeline.get("remove_local", True))
+            child = enqueue_upload(files, "source", parent_job=item["job"], remove_source=pipeline.get("remove_local", True),
+                                   remote_dirs=remote_dirs)
             queue._state(item, upload_job=child)
             append_log(item, f"queued upload job {child} ({len(files)} video file(s))")
         except Exception as exc:
@@ -312,7 +342,7 @@ def on_job_complete(item, code):
         parent = read_json(os.path.join(JOBS_DIR, meta["parent_job"] + ".meta.json")).get("pipeline")
         if parent:
             # rclone round trips; keep them off the scheduler thread.
-            threading.Thread(target=finish_remote_pipeline, args=(item, parent, meta.get("paths") or []),
+            threading.Thread(target=finish_remote_pipeline, args=(item, parent, meta.get("paths") or [], meta.get("remote_dirs")),
                              name="bili-remote-finish", daemon=True).start()
         return
     on_convert_complete(item, code)
@@ -331,7 +361,9 @@ def on_convert_complete(item, code):
         outputs = state.get("outputs") or []
         if not outputs:
             return
-        child = enqueue_upload(outputs, "hls", meta.get("keep_local", False), item["job"])
+        remote_source = (meta.get("pipeline") or {}).get("remote_source")
+        remote_dirs = [hls_remote_dir(remote_source, os.path.basename(str(path).rstrip("/"))) for path in outputs] if remote_source else None
+        child = enqueue_upload(outputs, "hls", meta.get("keep_local", False), item["job"], remote_dirs=remote_dirs)
         queue._state(item, upload_job=child)
         with open(item["log"], "a", encoding="utf-8") as out:
             out.write(f"==> queued separate Drive upload job {child}\n")
@@ -1426,7 +1458,8 @@ class H(BaseHTTPRequestHandler):
         if meta.get("kind") == "upload":
             try:
                 new_job = enqueue_upload(meta.get("paths") or [], meta.get("upload_kind") or "source",
-                                         meta.get("keep_local", False), meta.get("parent_job"), meta.get("remove_source", False))
+                                         meta.get("keep_local", False), meta.get("parent_job"), meta.get("remove_source", False),
+                                         meta.get("remote_dirs"))
             except (ValueError, OSError) as exc:
                 return self._send(400, json.dumps({"error": str(exc)}))
             return self._send(200, json.dumps({"job": new_job}))

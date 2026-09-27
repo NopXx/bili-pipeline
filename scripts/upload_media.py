@@ -31,6 +31,11 @@ def main():
         if not contained(path, root) or not (path.is_dir() if kind == "hls" else path.is_file()):
             raise ValueError(f"invalid upload path: {path}")
 
+    remote_dirs = config.get("remote_dirs")
+    if remote_dirs is not None and (len(remote_dirs) != len(paths) or any(
+            not isinstance(d, str) or d.startswith("/") or ".." in d.split("/") for d in remote_dirs)):
+        raise ValueError("invalid remote_dirs")
+
     env = dict(os.environ)
     update_state(state_path, phase="upload", status="running", progress=0)
     try:
@@ -39,7 +44,11 @@ def main():
             update_state(state_path, current_file=str(path), progress=0, speed="", done="", total="", eta="",
                          file_index=index, file_count=len(paths))
             if RCLONE_REMOTE:
-                destination = f"{RCLONE_REMOTE}/{path.name}" if kind == "hls" else f"{RCLONE_REMOTE}/{path.stem}/{path.name}"
+                if remote_dirs is not None:
+                    folder = f"{RCLONE_REMOTE}/{remote_dirs[index - 1]}".rstrip("/")
+                    destination = folder if kind == "hls" else f"{folder}/{path.name}"
+                else:
+                    destination = f"{RCLONE_REMOTE}/{path.name}" if kind == "hls" else f"{RCLONE_REMOTE}/{path.stem}/{path.name}"
                 command = ["rclone", "copy" if kind == "hls" else "copyto", str(path), destination,
                            "--stats=5s", "--stats-one-line", "--stats-log-level", "NOTICE"]
             else:
