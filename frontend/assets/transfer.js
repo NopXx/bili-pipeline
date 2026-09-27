@@ -86,7 +86,7 @@ createApp({
         this.message = `เพิ่มงานอัปโหลด ${result.job} แล้ว`; this.tab = 'queue'; this.loadJobs()
       } catch (error) { this.message = error.message }
     },
-    async loadJobs() { if (!this.token) return; try { this.jobs = (await this.api('/api/jobs')).filter(job => job.lane !== 'convert') } catch (error) { this.message = error.message } },
+    async loadJobs() { if (!this.token) return; try { this.jobs = (await this.api('/api/jobs')).filter(job => job.lane !== 'convert' && job.kind !== 'torrent_inspect') } catch (error) { this.message = error.message } },
     async showLog(job) { try { this.logJob = job; this.logText = (await this.api('/api/status', { job })).log || '' } catch (error) { this.message = error.message } },
     async action(path, job) { try { await this.api(path, { job }); await this.loadJobs(); if (this.logJob === job) await this.showLog(job) } catch (error) { this.message = error.message } },
     pause(job) { return this.action('/api/pause', job) },
