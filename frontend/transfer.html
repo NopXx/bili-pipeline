@@ -30,6 +30,7 @@
           <div class="field"><label>Magnet link หรือ URL ไฟล์ .torrent</label><input v-model="torrentSource" class="transfer-url" placeholder="magnet:?xt=urn:btih:…" :disabled="!!torrentData"></div>
           <div class="field"><label>หรือเลือกไฟล์ .torrent</label><input type="file" accept=".torrent,application/x-bittorrent" @change="chooseTorrent" :disabled="!!torrentSource.trim()"></div>
           <button @click="inspectTorrent" :disabled="!torrentSource.trim()&&!torrentData">อ่านรายการไฟล์</button>
+          <label v-if="torrentFiles.length" class="item" style="margin-top:8px"><input type="checkbox" :checked="selectedTorrent.length===torrentFiles.length" :indeterminate.prop="selectedTorrent.length>0&&selectedTorrent.length<torrentFiles.length" @change="toggleAllTorrent($event.target.checked)"><span class="item-main"><b>เลือกทั้งหมด</b> · {{selectedTorrent.length}} / {{torrentFiles.length}} ไฟล์ · {{size(torrentFiles.filter(file=>selectedTorrent.includes(file.index)).reduce((sum,file)=>sum+file.size,0))}}</span></label>
           <div v-if="torrentFiles.length" class="list"><label class="item" v-for="file in torrentFiles" :key="file.index"><input type="checkbox" :value="file.index" v-model="selectedTorrent"><span class="item-main">{{file.path}} · {{size(file.size)}}</span></label></div>
           <button v-if="torrentFiles.length" @click="submitTorrent" :disabled="!selectedTorrent.length">ดาวน์โหลดไฟล์ที่เลือก</button>
         </div>

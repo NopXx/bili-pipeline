@@ -59,6 +59,7 @@ createApp({
         this.message = `เลือกไฟล์ที่ต้องการดาวน์โหลด (${this.torrentFiles.length} รายการ)`
       } catch (error) { this.message = error.message }
     },
+    toggleAllTorrent(checked) { this.selectedTorrent = checked ? this.torrentFiles.map(file => file.index) : [] },
     async submitTorrent() {
       if (!this.inspectionJob) { this.message = 'อ่านรายการ torrent ใหม่ก่อน'; return }
       try {
