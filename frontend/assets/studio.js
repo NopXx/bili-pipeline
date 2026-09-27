@@ -234,18 +234,21 @@ createApp({
     },
     remoteProbe() { return this.remote.selected.map(p => this.remote.probes[p]).filter(m => m && !m.error) },
     remoteProbeErrors() { return this.remote.selected.map(p => this.remote.probes[p]).filter(m => m?.error) },
-    // Folders first, then files in the chosen order (names compare numerically: E2 < E10).
+    // Folders first, then files; both in the chosen order (names compare numerically: E2 < E10).
+    // Drive folders have no size and are never videos, so those orders keep folders A–Z.
     remoteItems() {
       const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      const time = f => Date.parse(f.modified) || 0
       const sorters = {
         name: byName,
         'name-desc': (a, b) => byName(b, a),
         size: (a, b) => (b.size || 0) - (a.size || 0) || byName(a, b),
-        modified: (a, b) => String(b.modified).localeCompare(String(a.modified)) || byName(a, b),
+        modified: (a, b) => time(b) - time(a) || byName(a, b),
         video: (a, b) => (b.video - a.video) || byName(a, b),
       }
-      const dirs = this.remote.items.filter(f => f.dir).sort(byName)
-      return [...dirs, ...this.remote.items.filter(f => !f.dir).sort(sorters[this.remoteSort] || byName)]
+      const sorter = sorters[this.remoteSort] || byName
+      const items = [...this.remote.items]
+      return [...items.filter(f => f.dir).sort(sorter), ...items.filter(f => !f.dir).sort(sorter)]
     },
     remoteVideos() { return this.remote.items.filter(f => !f.dir && f.video) },
     remoteSelectedSize() { return this.remote.selected.reduce((n, p) => n + (+this.remote.sizes[p] || 0), 0) },
