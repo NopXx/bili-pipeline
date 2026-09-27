@@ -55,6 +55,34 @@ class TransferOnlyTests(unittest.TestCase):
                     "torrent_data": base64.b64encode(b"d3:foo3:bare").decode()
                 })["job"]
                 self.assertEqual(web.jobs[inspection]["lane"], "inspect")
+                torrent_data = base64.b64encode(b"d4:infod4:name4:test6:lengthi4eeee").decode()
+                torrent = post("/api/torrent", {"torrent_data": torrent_data})["job"]
+                original_destination = web.jobs[torrent]["command"][3]
+                with self.assertRaises(urllib.error.HTTPError) as active_retry:
+                    post("/api/retry", {"job": torrent})
+                self.assertEqual(active_retry.exception.code, 409)
+                web.jobs[torrent]["status"] = "failed"
+                retried = post("/api/retry", {"job": torrent})["job"]
+                self.assertNotEqual(retried, torrent)
+                self.assertEqual(web.jobs[retried]["command"][3], original_destination)
+                with self.assertRaises(urllib.error.HTTPError) as duplicate_retry:
+                    post("/api/retry", {"job": torrent})
+                self.assertEqual(duplicate_retry.exception.code, 409)
+                inside = Path(original_destination) / "test.mkv"
+                inside.parent.mkdir(parents=True)
+                inside.write_bytes(b"downloaded")
+                protected = post("/api/delete/downloads", {"paths": [str(source), str(inside)]})
+                self.assertEqual(protected, {"deleted": 0, "failed": 2})
+                self.assertTrue(source.exists())
+                self.assertTrue(inside.exists())
+                web.jobs[job]["status"] = "completed"
+                web.jobs[retried]["status"] = "failed"
+                outside = Path(directory) / "outside.txt"
+                outside.write_text("keep")
+                deleted = post("/api/delete/downloads", {"paths": [str(inside), str(outside)]})
+                self.assertEqual(deleted, {"deleted": 1, "failed": 1})
+                self.assertFalse(inside.exists())
+                self.assertTrue(outside.exists())
             finally:
                 server.shutdown()
                 server.server_close()

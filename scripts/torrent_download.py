@@ -171,7 +171,7 @@ def main():
         "--check-integrity=true",
         "--seed-time=0",
         "--file-allocation=none",
-        "--auto-file-renaming=true",
+        "--auto-file-renaming=false",
         "--allow-overwrite=false",
         "--follow-torrent=true",
         "--bt-save-metadata=true",

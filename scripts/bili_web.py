@@ -599,7 +599,7 @@ class H(BaseHTTPRequestHandler):
         queue.submit(job, "download", ["node", DRIVE_DOWNLOAD, config_path, state_path])
         self._send(200, json.dumps({"job": job}))
 
-    def handle_torrent(self, body):
+    def handle_torrent(self, body, retry_destination=None):
         inspecting = body.get("inspect") is True
         selected = body.get("selected_files")
         inspection_job = str(body.get("inspection_job") or "")
@@ -660,7 +660,7 @@ class H(BaseHTTPRequestHandler):
         label = re.sub(r"[^\w .()\[\]-]+", "_", os.path.basename(label), flags=re.UNICODE).strip(" .")[:100]
         if not label:
             label = "torrent-" + job[:8]
-        destination = os.path.realpath(os.path.join(TORRENT_DOWNLOADS_DIR, f"{label}-{job[:6]}"))
+        destination = os.path.realpath(retry_destination) if retry_destination else os.path.realpath(os.path.join(TORRENT_DOWNLOADS_DIR, f"{label}-{job[:6]}"))
         if not destination.startswith(TORRENT_DOWNLOADS_DIR + os.sep):
             return self._send(400, json.dumps({"error": "invalid torrent destination"}))
 
@@ -992,8 +992,18 @@ class H(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             return self._send(404, json.dumps({"error": "this older job has no retry metadata"}))
         if meta.get("kind") == "torrent":
+            original = jobs.get(job)
+            if original and original["status"] in ("queued", "running", "paused"):
+                return self._send(409, json.dumps({"error": "งาน torrent เดิมยังทำงานอยู่"}))
+            destination = os.path.realpath(meta.get("destination") or "")
+            if not destination.startswith(TORRENT_DOWNLOADS_DIR + os.sep):
+                return self._send(400, json.dumps({"error": "invalid retry destination"}))
+            if any(item["lane"] == "download" and item["status"] in ("queued", "running", "paused")
+                   and len(item["command"]) > 3 and item["command"][1] == TORRENT_DOWNLOAD
+                   and os.path.realpath(item["command"][3]) == destination for item in jobs.values()):
+                return self._send(409, json.dumps({"error": "มีงานดาวน์โหลดลงโฟลเดอร์นี้อยู่แล้ว"}))
             if meta.get("source"):
-                return self.handle_torrent({"source": meta["source"], "name": meta.get("name", "")})
+                return self.handle_torrent({"source": meta["source"], "name": meta.get("name", "")}, retry_destination=destination)
             torrent_file = meta.get("torrent_file") or ""
             if os.path.isfile(torrent_file) and os.path.realpath(torrent_file).startswith(os.path.realpath(JOBS_DIR) + os.sep):
                 with open(torrent_file, "rb") as handle:
@@ -1001,7 +1011,7 @@ class H(BaseHTTPRequestHandler):
                 retry_body = {"torrent_data": encoded, "name": meta.get("name", "")}
                 if meta.get("selected_files"):
                     retry_body["selected_files"] = meta["selected_files"]
-                return self.handle_torrent(retry_body)
+                return self.handle_torrent(retry_body, retry_destination=destination)
             return self._send(404, json.dumps({"error": "ไม่พบไฟล์ .torrent เดิมสำหรับ retry"}))
         if meta.get("kind") == "hls":
             return self.handle_process(meta)
@@ -1036,18 +1046,40 @@ class H(BaseHTTPRequestHandler):
 
     def handle_delete_downloads(self, body):
         paths = body.get("paths") or []
+        if not isinstance(paths, list) or not paths or len(paths) > 1000:
+            return self._send(400, json.dumps({"error": "select 1–1000 downloaded files"}))
         deleted = failed = 0
-        for p in paths:
-            # never delete outside the downloads dir, whatever the client sends
-            rp = os.path.realpath(p)
-            if rp != DOWNLOADS_DIR and not rp.startswith(DOWNLOADS_DIR + os.sep):
-                failed += 1
-                continue
-            try:
-                os.remove(rp)
-                deleted += 1
-            except OSError:
-                failed += 1
+        with queue.lock:
+            protected = []
+            for item in jobs.values():
+                if item["status"] not in ("queued", "running", "paused"):
+                    continue
+                if item["lane"] == "download" and len(item["command"]) > 3 and item["command"][1] == TORRENT_DOWNLOAD:
+                    protected.append(("directory", os.path.realpath(item["command"][3])))
+                try:
+                    with open(item["meta"], encoding="utf-8") as handle:
+                        meta = json.load(handle)
+                except (OSError, ValueError):
+                    continue
+                for path in (meta.get("files") or []) + (meta.get("paths") or []):
+                    protected.append(("file", os.path.realpath(path)))
+                if item["lane"] == "download" and meta.get("destination"):
+                    protected.append(("directory", os.path.realpath(meta["destination"])))
+            for p in dict.fromkeys(path for path in paths if isinstance(path, str)):
+                rp = os.path.realpath(p)
+                if (not os.path.isabs(p) or not rp.startswith(DOWNLOADS_DIR + os.sep)
+                        or os.path.islink(p) or not os.path.isfile(p) or p.endswith((".aria2", ".part"))
+                        or os.path.exists(p + ".aria2")
+                        or any(rp == target if kind == "file" else rp.startswith(target + os.sep)
+                               for kind, target in protected)):
+                    failed += 1
+                    continue
+                try:
+                    os.remove(p)
+                    deleted += 1
+                except OSError:
+                    failed += 1
+            failed += sum(not isinstance(path, str) for path in paths)
         self._send(200, json.dumps({"deleted": deleted, "failed": failed}))
 
     def handle_list_drive(self, body):

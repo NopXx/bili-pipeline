@@ -43,7 +43,7 @@
         </div>
       </section>
       <section v-if="tab==='files'" class="panel transfer-section">
-        <div class="panel-title"><h2>ไฟล์ที่ดาวน์โหลด</h2><div class="right"><button class="secondary" @click="loadFiles">Refresh</button><button @click="upload" :disabled="!selectedFiles.length">อัปโหลด {{selectedFiles.length}} ไฟล์</button></div></div>
+        <div class="panel-title"><h2>ไฟล์ที่ดาวน์โหลด</h2><div class="right"><button class="secondary" @click="loadFiles">Refresh</button><button @click="upload" :disabled="!selectedFiles.length">อัปโหลด {{selectedFiles.length}} ไฟล์</button><button class="danger" @click="deleteFiles" :disabled="!selectedFiles.length">ลบ {{selectedFiles.length}} ไฟล์</button></div></div>
         <div class="note">อัปโหลดไฟล์ต้นฉบับโดยไม่แปลง HLS ผ่าน rclone remote ที่ตั้งใน notebook</div>
         <div class="list"><label class="item" v-for="file in files" :key="file.path"><input type="checkbox" :value="file.path" v-model="selectedFiles"><span class="item-main"><div class="item-name">{{file.relative}}</div><div class="item-meta">{{size(file.size)}}</div></span></label><div class="empty" v-if="!files.length">ยังไม่มีไฟล์ที่ดาวน์โหลดเสร็จ</div></div>
       </section>

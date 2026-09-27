@@ -86,6 +86,16 @@ createApp({
         this.message = `เพิ่มงานอัปโหลด ${result.job} แล้ว`; this.tab = 'queue'; this.loadJobs()
       } catch (error) { this.message = error.message }
     },
+    async deleteFiles() {
+      const paths = [...this.selectedFiles]
+      if (!paths.length || !confirm(`ลบไฟล์ที่เลือก ${paths.length} ไฟล์จากเครื่องถาวรหรือไม่?`)) return
+      try {
+        const result = await this.api('/api/delete/downloads', { paths })
+        this.selectedFiles = []
+        await this.loadFiles()
+        this.message = `ลบแล้ว ${result.deleted} ไฟล์${result.failed ? ` · ลบไม่ได้ ${result.failed} ไฟล์ (อาจมีงานกำลังใช้อยู่)` : ''}`
+      } catch (error) { this.message = error.message }
+    },
     async loadJobs() { if (!this.token) return; try { this.jobs = (await this.api('/api/jobs')).filter(job => job.lane !== 'convert' && job.kind !== 'torrent_inspect').sort((a, b) => b.created.localeCompare(a.created) || b.job.localeCompare(a.job)) } catch (error) { this.message = error.message } },
     async showLog(job) {
       if (this.logJob !== job) { this.logJob = job; this.logText = 'กำลังโหลด log…' }
