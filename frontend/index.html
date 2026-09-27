@@ -152,7 +152,12 @@
                     <span class="size">{{size(file.size)}}</span>
                   </label>
                 </div>
-                <button class="wide" @click="submitTorrent" :disabled="!selectedTorrent.length">ดาวน์โหลด {{selectedTorrent.length}} ไฟล์</button>
+                <div class="option-flags">
+                  <label class="check"><input type="checkbox" v-model="torrentUpload.upload"> อัปโหลดวิดีโอขึ้น Drive อัตโนมัติเมื่อโหลดเสร็จ</label>
+                  <label class="check" v-if="torrentUpload.upload"><input type="checkbox" v-model="torrentUpload.removeLocal"> ลบไฟล์ในเครื่องทีละไฟล์หลังอัปโหลดสำเร็จ</label>
+                </div>
+                <p class="hint" v-if="torrentUpload.upload">ไฟล์วิดีโอแต่ละไฟล์ไปอยู่ในโฟลเดอร์ของตัวเองบน Drive แล้วเปิด “คลัง Drive” บนเครื่องที่มี GPU เพื่อแปลงต่อ</p>
+                <button class="wide" @click="submitTorrent" :disabled="!selectedTorrent.length">ดาวน์โหลด {{selectedTorrent.length}} ไฟล์{{torrentUpload.upload ? ' แล้วอัปโหลด' : ''}}</button>
               </div>
               <p class="hint">ดาวน์โหลดต่อได้ถ้าสะดุด ใช้ DHT/PEX และหยุด seed ทันทีเมื่อโหลดครบ</p>
             </div>

@@ -50,8 +50,13 @@ def main():
                 command = ["node", str(script), str(path), folder_id] if kind == "hls" else ["node", str(script), folder_id, str(path)]
             run_with_progress(command, env, 0, "UPLOAD", state_path)
             update_state(state_path, progress=int(index * 100 / len(paths)))
+            if kind == "source" and config.get("remove_source"):
+                # Only for auto-uploaded torrents; rclone/Drive already
+                # confirmed this file, and later files may still need space.
+                path.unlink()
+                print(f"removed uploaded source: {path}", flush=True)
 
-        # Never delete a source download. Only remove job-owned HLS bundles
+        # Keep source downloads unless the job asked for remove_source. Remove job-owned HLS bundles
         # after every upload in this job has succeeded.
         if kind == "hls" and not config.get("keep_local", False):
             for path in paths:

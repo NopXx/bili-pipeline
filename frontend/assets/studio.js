@@ -183,6 +183,7 @@ createApp({
     biliOptions: { ...BILI_DEFAULTS, ...Shared.load('studio-bili-options', {}), redownload: false },
     BILI_QUALITIES: Shared.BILI_QUALITIES, BILI_CODECS: Shared.BILI_CODECS, BILI_AUDIO: Shared.BILI_AUDIO,
     torrentSource: '', torrentData: '', torrentFileName: '', torrentName: '', torrentFiles: [], selectedTorrent: [], torrentFilter: '',
+    torrentUpload: { upload: false, removeLocal: true, ...Shared.load('studio-torrent-upload', {}) },
     inspectionJob: '', inspectionPending: false,
     driveLink: '',
     remote: { root: '', path: '', items: [], selected: [], sizes: {}, busy: false, error: '', loaded: false, deleteSource: false, probes: {}, probing: false },
@@ -268,6 +269,7 @@ createApp({
     remoteSort(value) { Shared.save('studio-remote-sort', value) },
     'remote.selected'() { clearTimeout(this.remoteProbeTimer); this.remoteProbeTimer = setTimeout(() => this.probeRemote(), 700) },
     biliOptions: { deep: true, handler(value) { Shared.save('studio-bili-options', { ...value, redownload: false }) } },
+    torrentUpload: { deep: true, handler(value) { Shared.save('studio-torrent-upload', value) } },
     config: { deep: true, handler(value) { Shared.save('studio-hls', value) } },
   },
   methods: {
@@ -406,7 +408,8 @@ createApp({
     async submitTorrent() {
       if (!this.inspectionJob) { this.notify('อ่านรายการ torrent ใหม่ก่อน', 'error'); return }
       try {
-        const result = await this.api('/api/torrent', { inspection_job: this.inspectionJob, selected_files: this.selectedTorrent, name: this.torrentName.trim() || this.torrentFileName })
+        const result = await this.api('/api/torrent', { inspection_job: this.inspectionJob, selected_files: this.selectedTorrent, name: this.torrentName.trim() || this.torrentFileName,
+          upload_source: this.torrentUpload.upload, remove_local: this.torrentUpload.removeLocal })
         this.torrentSource = ''; this.torrentData = ''; this.torrentFileName = ''; this.torrentName = ''; this.resetTorrent()
         this.queued(result.job)
       } catch (error) { this.fail(error) }

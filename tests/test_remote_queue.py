@@ -115,6 +115,45 @@ class RemoteQueueTests(unittest.TestCase):
         self.assertEqual(calls[-1], ["rclone", "deletefile", "metube:tube/Movie/Movie.mkv"])
         self.assertIn("deleted remote original", Path(web.jobs[upload]["log"]).read_text())
 
+    def test_torrent_auto_upload_queues_source_upload_that_removes_files(self):
+        web = self.web
+        folder = Path(web.TORRENT_DOWNLOADS_DIR, "Show-abc123")
+        folder.mkdir(parents=True)
+        videos = [folder / "E01.mkv", folder / "E02.mkv"]
+        for video in videos:
+            video.write_bytes(b"video")
+        (folder / "info.nfo").write_text("x")
+        sent = []
+        handler = web.H.__new__(web.H)
+        handler._send = lambda code, body: sent.append((code, json.loads(body)))
+        with patch.object(web.queue, "submit"):
+            handler.handle_torrent({"source": "magnet:?xt=urn:btih:" + "a" * 40, "upload_source": True})
+        code, body = sent[0]
+        self.assertEqual(code, 200, body)
+        job = body["job"]
+        meta = json.loads(Path(web.JOBS_DIR, job + ".meta.json").read_text())
+        self.assertEqual(meta["pipeline"], {"upload_source": True, "remove_local": True})
+
+        item = {"job": job, "lane": "download", "meta": str(Path(web.JOBS_DIR, job + ".meta.json")),
+                "state": str(Path(web.JOBS_DIR, job + ".json")), "log": str(Path(web.JOBS_DIR, job + ".log"))}
+        Path(item["state"]).write_text(json.dumps({"video_files": [str(v) for v in videos]}))
+        with patch.object(web.queue, "submit"), patch.object(web.queue, "_state") as state:
+            web.on_job_complete(item, 0)
+        upload = state.call_args.kwargs["upload_job"]
+        config = json.loads(Path(web.JOBS_DIR, upload + ".config.json").read_text())
+        self.assertEqual((config["kind"], config["paths"], config["remove_source"]), ("source", [str(v) for v in videos], True))
+
+        # upload_media deletes each video only after its own upload succeeded.
+        state_path = Path(web.JOBS_DIR, upload + ".json")
+        state_path.write_text("{}")
+        import upload_media
+        uploaded = []
+        with patch.object(upload_media, "DOWNLOADS", Path(os.environ["BILI_DOWNLOADS_DIR"]).resolve()),              patch.object(upload_media, "RCLONE_REMOTE", "metube:tube"),              patch.object(upload_media, "run_with_progress", lambda command, *rest: uploaded.append((command[2], Path(command[2]).exists()))),              patch.object(sys, "argv", ["upload_media.py", str(Path(web.JOBS_DIR, upload + ".config.json")), str(state_path)]):
+            upload_media.main()
+        self.assertEqual(uploaded, [(str(v), True) for v in videos])
+        self.assertEqual([v.exists() for v in videos], [False, False])
+        self.assertTrue((folder / "info.nfo").exists())
+
     def test_failed_upload_can_be_retried(self):
         web = self.web
         video = Path(os.environ["BILI_DOWNLOADS_DIR"], "Show", "E01.mkv")

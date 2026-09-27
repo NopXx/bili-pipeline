@@ -69,9 +69,11 @@ JOB_DETAIL_KEYS = ("phase", "error", "exit_code", "speed", "eta", "done", "total
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(TORRENT_DOWNLOADS_DIR, exist_ok=True)
-def enqueue_upload(paths, kind, keep_local=False, parent_job=None):
+def enqueue_upload(paths, kind, keep_local=False, parent_job=None, remove_source=False):
     job = secrets.token_hex(8)
-    config = {"kind": kind, "paths": paths, "keep_local": bool(keep_local)}
+    # remove_source: delete each source file once its own upload succeeded
+    # (auto-upload after a torrent, to keep a small disk from filling up).
+    config = {"kind": kind, "paths": paths, "keep_local": bool(keep_local), "remove_source": bool(remove_source)}
     config_path = os.path.join(JOBS_DIR, job + ".config.json")
     with open(config_path, "w", encoding="utf-8") as out:
         json.dump(config, out, ensure_ascii=False, indent=2)
@@ -291,6 +293,19 @@ def on_job_complete(item, code):
             append_log(item, f"queued HLS conversion job {child}")
         except Exception as exc:
             append_log(item, f"could not queue HLS conversion: {exc}")
+        return
+    if item["lane"] == "download" and pipeline.get("upload_source"):
+        # Torrent with auto-upload: send the videos to Drive, e.g. to convert them on Kaggle later.
+        files = read_json(item["state"]).get("video_files") or []
+        if not files:
+            append_log(item, "auto-upload skipped: no video files downloaded")
+            return
+        try:
+            child = enqueue_upload(files, "source", parent_job=item["job"], remove_source=pipeline.get("remove_local", True))
+            queue._state(item, upload_job=child)
+            append_log(item, f"queued upload job {child} ({len(files)} video file(s))")
+        except Exception as exc:
+            append_log(item, f"could not queue upload: {exc}")
         return
     if item["lane"] == "upload" and meta.get("upload_kind") == "hls" and meta.get("parent_job"):
         parent = read_json(os.path.join(JOBS_DIR, meta["parent_job"] + ".meta.json")).get("pipeline")
@@ -962,6 +977,8 @@ class H(BaseHTTPRequestHandler):
             "job": job, "kind": "torrent_inspect" if inspecting else "torrent", "created": created, "name": label, "selected_files": selected,
             "source": source, "torrent_file": torrent_path, "destination": destination,
         }
+        if body.get("upload_source") is True and not inspecting:
+            meta["pipeline"] = {"upload_source": True, "remove_local": body.get("remove_local") is not False}
         with open(meta_path, "w", encoding="utf-8") as handle:
             json.dump(meta, handle, ensure_ascii=False, indent=2)
         command = [sys.executable, TORRENT_DOWNLOAD, source_arg, destination, state_path]
@@ -1360,13 +1377,14 @@ class H(BaseHTTPRequestHandler):
                    and len(item["command"]) > 3 and item["command"][1] == TORRENT_DOWNLOAD
                    and os.path.realpath(item["command"][3]) == destination for item in jobs.values()):
                 return self._send(409, json.dumps({"error": "มีงานดาวน์โหลดลงโฟลเดอร์นี้อยู่แล้ว"}))
+            upload = {"upload_source": True, "remove_local": meta["pipeline"].get("remove_local", True)} if (meta.get("pipeline") or {}).get("upload_source") else {}
             if meta.get("source"):
-                return self.handle_torrent({"source": meta["source"], "name": meta.get("name", "")}, retry_destination=destination)
+                return self.handle_torrent({"source": meta["source"], "name": meta.get("name", ""), **upload}, retry_destination=destination)
             torrent_file = meta.get("torrent_file") or ""
             if os.path.isfile(torrent_file) and os.path.realpath(torrent_file).startswith(os.path.realpath(JOBS_DIR) + os.sep):
                 with open(torrent_file, "rb") as handle:
                     encoded = base64.b64encode(handle.read()).decode("ascii")
-                retry_body = {"torrent_data": encoded, "name": meta.get("name", "")}
+                retry_body = {"torrent_data": encoded, "name": meta.get("name", ""), **upload}
                 if meta.get("selected_files"):
                     retry_body["selected_files"] = meta["selected_files"]
                 return self.handle_torrent(retry_body, retry_destination=destination)
@@ -1388,7 +1406,7 @@ class H(BaseHTTPRequestHandler):
         if meta.get("kind") == "upload":
             try:
                 new_job = enqueue_upload(meta.get("paths") or [], meta.get("upload_kind") or "source",
-                                         meta.get("keep_local", False), meta.get("parent_job"))
+                                         meta.get("keep_local", False), meta.get("parent_job"), meta.get("remove_source", False))
             except (ValueError, OSError) as exc:
                 return self._send(400, json.dumps({"error": str(exc)}))
             return self._send(200, json.dumps({"job": new_job}))
