@@ -154,6 +154,14 @@ class RemoteQueueTests(unittest.TestCase):
         self.assertEqual([v.exists() for v in videos], [False, False])
         self.assertTrue((folder / "info.nfo").exists())
 
+    def test_pages_pin_assets_to_their_content(self):
+        web = self.web
+        page = '<script src="/assets/studio.js"></script><link href="/assets/missing.css">'
+        pinned = web.ASSET_REF.sub(lambda m: m.group(0) + "?v=" + web.asset_version(m.group(1)), page)
+        self.assertIn('/assets/studio.js?v=' + web.asset_version("studio.js") + '"', pinned)
+        self.assertRegex(web.asset_version("studio.js"), r"^[0-9a-f]{10}$")
+        self.assertIn('/assets/missing.css?v=0"', pinned)
+
     def test_failed_upload_can_be_retried(self):
         web = self.web
         video = Path(os.environ["BILI_DOWNLOADS_DIR"], "Show", "E01.mkv")

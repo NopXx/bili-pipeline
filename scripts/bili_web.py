@@ -15,6 +15,7 @@ BILI_WEB_HOST=0.0.0.0 only if you deliberately want it network-reachable.
 """
 import base64
 import binascii
+import hashlib
 import hmac
 import html
 import json
@@ -689,14 +690,27 @@ if(ACTIVE_JOB){ $('#go').disabled=true; $('#log').style.display='block'; $('#can
 </script></body></html>"""
 
 
+ASSET_REF = re.compile(r"""(?<=["'])/assets/([\w.-]+)(?=["'])""")
+
+
+def asset_version(name):
+    try:
+        with open(os.path.join(FRONTEND_DIR, "assets", name), "rb") as handle:
+            return hashlib.sha1(handle.read()).hexdigest()[:10]
+    except OSError:
+        return "0"
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code, body, ctype="application/json", cache=None):
         data = body if isinstance(body, bytes) else body.encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        if cache:
+            self.send_header("Cache-Control", cache)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -722,7 +736,13 @@ class H(BaseHTTPRequestHandler):
             ctype = mimetypes.guess_type(target)[0] or "application/octet-stream"
             if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
                 ctype += "; charset=utf-8"
-            return self._send(200, content, ctype)
+            if target.endswith(".html"):
+                # Pages always revalidate and pin each asset to its content
+                # hash, so a browser or the Cloudflare edge never pairs a new
+                # page with an old script after a code update.
+                content = ASSET_REF.sub(lambda m: m.group(0) + "?v=" + asset_version(m.group(1)), content.decode()).encode()
+                return self._send(200, content, ctype, "no-cache")
+            return self._send(200, content, ctype, "public, max-age=31536000, immutable" if "?v=" in self.path else "no-cache")
         self._send(404, json.dumps({"error": "not found"}))
 
     ROUTES = {
