@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from job_queue import JobQueue  # noqa: E402
+from job_queue import JobQueue, visible_convert_gpus  # noqa: E402
 
 
 class FakeProcess:
@@ -15,6 +15,7 @@ class FakeProcess:
 
     def __init__(self, command, **kwargs):
         self.command = command
+        self.env = kwargs["env"]
         self.returncode = None
         self.pid = FakeProcess.next_pid
         FakeProcess.next_pid += 1
@@ -28,7 +29,7 @@ class QueueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory, patch(
             "job_queue.subprocess.Popen", FakeProcess
         ):
-            queue = JobQueue(directory)
+            queue = JobQueue(directory, convert_gpus=[])
             queue.submit("a" * 16, "download", ["fake", "download"])
             queue.pump()
             queue.submit("b" * 16, "inspect", ["fake", "inspect"])
@@ -40,7 +41,7 @@ class QueueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory, patch(
             "job_queue.subprocess.Popen", FakeProcess
         ):
-            queue = JobQueue(directory)
+            queue = JobQueue(directory, convert_gpus=[])
             queue.submit("c" * 16, "convert", ["fake", "convert"])
             queue.pump()
             self.assertEqual(queue.jobs["c" * 16]["status"], "running")
@@ -55,7 +56,7 @@ class QueueTests(unittest.TestCase):
             "job_queue.os.killpg", create=True
         ) as signal_group, patch("job_queue.signal.SIGSTOP", 19, create=True), patch("job_queue.signal.SIGCONT", 18, create=True):
             completed = []
-            queue = JobQueue(directory, lambda item, code: completed.append((item["job"], code)), download_concurrency=1)
+            queue = JobQueue(directory, lambda item, code: completed.append((item["job"], code)), download_concurrency=1, convert_gpus=[])
             for job, lane in (("a" * 16, "download"), ("b" * 16, "download"),
                               ("c" * 16, "convert"), ("d" * 16, "upload")):
                 queue.submit(job, lane, ["fake", job])
@@ -93,7 +94,7 @@ class QueueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory, patch(
             "job_queue.subprocess.Popen", FakeProcess
         ):
-            queue = JobQueue(directory, download_concurrency=2)
+            queue = JobQueue(directory, download_concurrency=2, convert_gpus=[])
             for letter in "abc":
                 queue.submit(letter * 16, "download", ["fake", letter])
             queue.pump()
@@ -109,6 +110,36 @@ class QueueTests(unittest.TestCase):
             for value in (0, 9, "abc"):
                 with self.assertRaisesRegex(ValueError, "download concurrency"):
                     JobQueue(directory, download_concurrency=value)
+
+    def test_two_conversions_use_separate_gpus(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory, patch(
+            "job_queue.subprocess.Popen", FakeProcess
+        ):
+            queue = JobQueue(directory, convert_gpus=[0, 1])
+            for letter in "abc":
+                queue.submit(letter * 16, "convert", ["fake", letter])
+            queue.pump()
+            self.assertEqual([queue.jobs[letter * 16]["status"] for letter in "abc"],
+                             ["running", "running", "queued"])
+            self.assertEqual(queue.jobs["a" * 16]["proc"].env["CUDA_VISIBLE_DEVICES"], "0")
+            self.assertEqual(queue.jobs["b" * 16]["proc"].env["CUDA_VISIBLE_DEVICES"], "1")
+            queue.jobs["a" * 16]["proc"].returncode = 0
+            queue.pump()
+            self.assertEqual(queue.jobs["c" * 16]["proc"].env["CUDA_VISIBLE_DEVICES"], "0")
+
+    def test_single_gpu_keeps_one_conversion_slot(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory, patch(
+            "job_queue.subprocess.Popen", FakeProcess
+        ):
+            queue = JobQueue(directory, convert_gpus=[0])
+            for letter in "ab":
+                queue.submit(letter * 16, "convert", ["fake", letter])
+            queue.pump()
+            self.assertEqual(queue.jobs["b" * 16]["status"], "queued")
+
+    def test_gpu_detection_respects_visible_devices(self):
+        with patch.dict("job_queue.os.environ", {"CUDA_VISIBLE_DEVICES": "1,0"}):
+            self.assertEqual(visible_convert_gpus(), ["1", "0"])
 
 
 if __name__ == "__main__":

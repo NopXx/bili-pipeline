@@ -852,6 +852,7 @@ class H(BaseHTTPRequestHandler):
             "disk_total": usage.total,
             "disk_free": usage.free,
             "active_jobs": active,
+            "convert_gpus": queue.convert_gpus,
             "transfer_only": TRANSFER_ONLY,
         }))
 
@@ -974,6 +975,7 @@ class H(BaseHTTPRequestHandler):
                 "kind": meta.get("kind", "download"),
                 "lane": current["lane"] if current else meta.get("kind", "download"),
                 "progress": state.get("progress", 0),
+                "gpu": current.get("gpu") if current else state.get("gpu"),
                 "parent_job": meta.get("parent_job"),
                 "created": meta.get("created", time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(modified))),
                 "log_size": size, "modified": modified,

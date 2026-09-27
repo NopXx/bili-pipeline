@@ -10,6 +10,8 @@ Self-hosted pipeline that downloads video, converts it to browser-playable HLS, 
 
 Long-running work runs in independent queues: torrent inspection, download, HLS conversion, and Drive upload. Up to two downloads run concurrently by default; set `BILI_DOWNLOAD_CONCURRENCY` to an integer from 1 to 8 to change this. Inspection can read the next torrent's file list while downloads are active. A successful conversion enqueues a separate upload job, so upload can be paused while conversion continues. The UI shows the download, conversion, and upload lanes with progress and per-job controls.
 
+On a host with two visible NVIDIA GPUs, two HLS conversions run at once, one per GPU. Each worker receives its own `CUDA_VISIBLE_DEVICES`; the queue shows the assigned GPU. With one or no detected GPU, conversion stays one-at-a-time. Set `BILI_CONVERT_GPUS=0,1` before starting the web server to choose the GPU IDs explicitly. Existing running jobs are not reassigned; restart the server only after they finish.
+
 ## Layout
 
 - `scripts/bili_web.py` — HTTP control server (token-guarded, loopback; reach it over an SSH tunnel). Routes include queue status, pause/resume/cancel/retry, and files.

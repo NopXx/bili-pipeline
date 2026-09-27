@@ -13,8 +13,28 @@ LANES = ("inspect", "download", "convert", "upload")
 ACTIVE = {"queued", "running", "paused"}
 
 
+def visible_convert_gpus():
+    """Return CUDA device selectors the server is permitted to use."""
+    configured = os.environ.get("BILI_CONVERT_GPUS")
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if configured is not None:
+        return [gpu.strip() for gpu in configured.split(",") if gpu.strip()][:2]
+    if visible is not None:
+        return [gpu.strip() for gpu in visible.split(",") if gpu.strip() and gpu.strip() != "-1"][:2]
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if result.returncode == 0:
+            return [line.strip() for line in result.stdout.splitlines() if line.strip().isdigit()][:2]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return []
+
+
 class JobQueue:
-    def __init__(self, jobs_dir, on_complete=None, download_concurrency=None):
+    def __init__(self, jobs_dir, on_complete=None, download_concurrency=None, convert_gpus=None):
         if download_concurrency is None:
             download_concurrency = os.environ.get("BILI_DOWNLOAD_CONCURRENCY", "2")
         try:
@@ -25,6 +45,8 @@ class JobQueue:
             raise ValueError("download concurrency must be an integer from 1 to 8")
         self.limits = {lane: 1 for lane in LANES}
         self.limits["download"] = download_concurrency
+        self.convert_gpus = visible_convert_gpus() if convert_gpus is None else [str(gpu) for gpu in convert_gpus][:2]
+        self.limits["convert"] = max(1, len(self.convert_gpus))
         self.root = Path(jobs_dir)
         self.root.mkdir(parents=True, exist_ok=True)
         self.on_complete = on_complete
@@ -44,7 +66,7 @@ class JobQueue:
         os.replace(temporary, path)
 
     def _persist(self, item):
-        record = {key: item[key] for key in ("job", "lane", "command", "env_overrides", "log", "state", "meta", "status", "created_at")}
+        record = {key: item[key] for key in ("job", "lane", "command", "env_overrides", "log", "state", "meta", "status", "created_at", "gpu")}
         record["pid"] = item["proc"].pid if item["proc"] is not None else item.get("pid")
         path = self.root / f"{item['job']}.queue.json"
         temporary = Path(str(path) + ".tmp")
@@ -58,6 +80,7 @@ class JobQueue:
                 if record.get("lane") not in LANES or not record.get("command"):
                     continue
                 record["proc"] = None
+                record.setdefault("gpu", None)
                 record["cancelled"] = False
                 # Never mistake an orphaned worker for a managed process after
                 # a web-server restart. Queued work survives; running work is
@@ -106,7 +129,7 @@ class JobQueue:
                 "state": str(self.root / f"{job}.json"),
                 "meta": str(self.root / f"{job}.meta.json"),
                 "status": "queued", "created_at": time.time(),
-                "proc": None, "cancelled": False,
+                "proc": None, "cancelled": False, "gpu": None,
             }
             Path(item["log"]).touch()
             self._state(item, status="queued", phase="queued")
@@ -207,17 +230,26 @@ class JobQueue:
                     if slots <= 0:
                         break
                     try:
+                        gpu = None
+                        if lane == "convert" and self.convert_gpus:
+                            busy = {other["gpu"] for other in self.jobs.values()
+                                    if other["lane"] == "convert" and other["status"] == "running"}
+                            gpu = next(device for device in self.convert_gpus if device not in busy)
+                        worker_env = {**os.environ, **item["env_overrides"], "BILI_QUEUE_JOB_ID": item["job"]}
+                        if gpu is not None:
+                            worker_env["CUDA_VISIBLE_DEVICES"] = gpu
                         log = open(item["log"], "a", encoding="utf-8")
                         try:
                             proc = subprocess.Popen(
-                                item["command"], env={**os.environ, **item["env_overrides"], "BILI_QUEUE_JOB_ID": item["job"]},
+                                item["command"], env=worker_env,
                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                             )
                         finally:
                             log.close()
                         item["proc"] = proc
+                        item["gpu"] = gpu
                         item["status"] = "running"
-                        self._state(item, status="running", phase=lane)
+                        self._state(item, status="running", phase=lane, gpu=gpu)
                         self._persist(item)
                         slots -= 1
                     except Exception as exc:
