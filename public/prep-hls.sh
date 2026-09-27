@@ -476,6 +476,16 @@ if [ -n "${PREP_LADDER:-}" ] && [ "$is_hdr" = "1" ] && [ "$tonemap_backend" = "o
   gpu_hdr_ladder=1
 fi
 
+# How much H.264 bitrate one bit of the source codec is worth. Override with
+# PREP_CODEC_BITRATE_FACTOR (e.g. 1 to cap at the raw source bitrate).
+codec_bitrate_factor() {
+  if [ -n "${PREP_CODEC_BITRATE_FACTOR:-}" ]; then echo "$PREP_CODEC_BITRATE_FACTOR"; return; fi
+  case "${video_codec:-}" in
+    hevc|h265|av1|vp9) echo 1.6 ;;
+    *) echo 1 ;;
+  esac
+}
+
 # Rough per-height target bitrates for the ladder, in the range a streaming
 # service uses for H.264 — an explicit PREP_VIDEO_BITRATE only overrides the
 # single-rendition (no-ladder) encode, not the ladder rungs.
@@ -502,10 +512,12 @@ rung_bitrate() {
   done
   # Cap the normal H.264 target at the source bitrate, scaled by the nominal
   # quality tier rather than the cropped stored height (1920x800 is 1080p).
+  # HEVC/AV1/VP9 need roughly 1.5-2x the bitrate in H.264 for similar
+  # quality, so their source bitrate counts for more (still under the cap).
   if [[ "${video_bitrate:-}" =~ ^[0-9]+$ ]] && [ "$video_bitrate" -gt 0 ] &&
     [ -n "${video_reference_height:-}" ] && [ "$video_reference_height" -gt 0 ]; then
-    awk -v src="$video_bitrate" -v h="$1" -v sh="$video_reference_height" -v cap="$cap" \
-      'BEGIN { v = src / 1000 * h / sh; if (v < 500) v = 500; if (v > cap) v = cap; printf "%.0fk\n", v }'
+    awk -v src="$video_bitrate" -v h="$1" -v sh="$video_reference_height" -v cap="$cap" -v f="$(codec_bitrate_factor)" \
+      'BEGIN { v = src / 1000 * f * h / sh; if (v < 500) v = 500; if (v > cap) v = cap; printf "%.0fk\n", v }'
   else
     echo "${cap}k"
   fi

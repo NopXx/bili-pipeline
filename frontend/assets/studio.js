@@ -77,7 +77,9 @@ const HlsConfig = {
     suggested(h, m = this.probe[0]) {
       const defaults = { 2160: 16e6, 1440: 10e6, 1080: 8e6, 720: 4e6, 480: 2e6 }
       let value = defaults[h] || 8e6
-      if (m?.video?.height) value = Math.min(value, this.sourceRate(m) * h / Math.max(1, this.tierHeight(m)))
+      // Same as the engine: HEVC/AV1/VP9 bits are worth ~1.6 H.264 bits.
+      const factor = ['hevc', 'h265', 'av1', 'vp9'].includes(m?.video?.codec) ? 1.6 : 1
+      if (m?.video?.height) value = Math.min(value, this.sourceRate(m) * factor * h / Math.max(1, this.tierHeight(m)))
       return (Math.max(5e5, Math.round(value / 1e5) * 1e5) / 1e6).toFixed(1).replace(/\.0$/, '') + 'M'
     },
     configureFromProbe() {
