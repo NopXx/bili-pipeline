@@ -32,7 +32,7 @@ Long-running work runs in three independent, one-at-a-time queues: download, HLS
 ## Notes
 
 - The server binds loopback only; access it via an SSH tunnel.
-- Set `BILI_TRANSFER_ONLY=1` to serve the download/upload-only web UI and reject HLS conversion requests. The separate Kaggle notebook `bili-studio-transfer-only-kaggle.ipynb` starts this mode with rclone and a temporary tunnel; no GPU is needed. Upload is manual from the Files tab.
+- Set `BILI_TRANSFER_ONLY=1` to serve the download/upload-only web UI and reject HLS conversion requests. No GPU is needed. Upload is manual from the Files tab.
 - Secrets live solely in `.env.local` and the Postgres `settings` table — nothing sensitive is committed.
 - Pause/resume works for queued and running downloads/uploads. Running torrent and rclone workers are suspended as a process group; Bilibili jobs also ask Bili23's MCP server to pause/resume each task. Bilibili tasks cannot be paused before Bili23 has returned task IDs.
 - A paused **running** job is marked interrupted if the web server restarts; retry it to resume a resumable torrent/rclone transfer. A paused **queued** job stays paused. Do not restart the server during active jobs when upgrading.
