@@ -12,7 +12,7 @@
     <header class="bar">
       <div class="brand">Bili <span>Studio</span> <small>Transfer</small></div>
       <div class="bar-stats" v-if="token">
-        <span class="chip" :class="online ? 'ok' : 'bad'" :title="online ? 'เชื่อมต่อเซิร์ฟเวอร์แล้ว' : lastError"><i class="dot"></i>{{online ? 'ออนไลน์' : 'ขาดการเชื่อมต่อ'}}</span>
+        <span class="chip" :class="online && !tokenInvalid ? 'ok' : 'bad'" :title="online ? 'เชื่อมต่อเซิร์ฟเวอร์แล้ว' : lastError"><i class="dot"></i>{{!online ? 'ขาดการเชื่อมต่อ' : tokenInvalid ? 'token ไม่ถูกต้อง' : 'ออนไลน์'}}</span>
         <span class="chip" v-if="health" :class="{warn: health.disk_free < 20 * 1024 ** 3}" :title="`พื้นที่ว่างในโฟลเดอร์ดาวน์โหลด จากทั้งหมด ${size(health.disk_total)}`">ว่าง {{size(health.disk_free)}}</span>
       </div>
       <form class="token" v-if="!token || editingToken" @submit.prevent="saveToken">
@@ -89,7 +89,7 @@
         </div>
 
         <div v-if="source === 'bili'" class="form">
-          <bili-account :api="api" @notify="notify"></bili-account>
+          <bili-account :key="token" :api="api" @notify="notify"></bili-account>
           <label class="field">
             <span>Bilibili URL</span>
             <input v-model="biliUrl" placeholder="https://www.bilibili.com/video/BV…" @keyup.enter="parseBili">

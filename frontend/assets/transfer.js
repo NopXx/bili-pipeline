@@ -47,7 +47,7 @@ function toLines(text) {
 createApp({
   data() { return {
     token: localStorage.getItem('bwt') || '', tokenDraft: '', editingToken: false,
-    online: true, lastError: '', health: null,
+    online: true, tokenInvalid: false, lastError: '', health: null,
     view: 'queue', source: 'torrent', toasts: [],
     driveLink: '', torrentSource: '', torrentData: '', torrentFileName: '', torrentFiles: [], selectedTorrent: [], torrentFilter: '',
     inspectionJob: '', inspectionPending: false,
@@ -132,7 +132,11 @@ createApp({
       }
       this.online = true
       const data = await response.json().catch(() => ({}))
-      if (response.status === 401) throw Error('Access token ไม่ถูกต้อง')
+      this.tokenInvalid = response.status === 401
+      if (this.tokenInvalid) {
+        this.editingToken = true
+        throw Error('Access token ไม่ถูกต้อง (token เปลี่ยนทุกครั้งที่รีสตาร์ตเซิร์ฟเวอร์ ถ้ารันเซลล์ server ใหม่ต้องใส่ token ใหม่)')
+      }
       if (!response.ok || data.error) throw Error(data.error || `HTTP ${response.status}`)
       return data
     },

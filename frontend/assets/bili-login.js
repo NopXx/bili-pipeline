@@ -6,21 +6,24 @@ const BiliAccount = {
   props: { api: { type: Function, required: true } },
   emits: ['notify'],
   data() { return {
-    auth: null, loading: false, restarting: false,
+    auth: null, error: '', loading: false, restarting: false,
     qr: { open: false, key: '', svg: '', state: '', expiresAt: 0 }, timer: null,
   } },
   computed: {
     needsRestart() { return !!(this.auth?.valid && this.auth.bili23 && !this.auth.bili23.logged_in) },
     tone() {
       const auth = this.auth
-      if (!auth) return ''
+      if (!auth) return this.error ? 'bad' : ''
       if (!auth.config || auth.valid === false) return 'bad'
       return auth.valid && !this.needsRestart ? 'ok' : 'warn'
     },
     text() {
       const auth = this.auth
-      if (!auth) return this.loading ? 'กำลังตรวจสถานะบัญชี Bilibili…' : 'ยังไม่ได้ตรวจสถานะบัญชี Bilibili'
-      if (!auth.config) return 'ไม่พบ config.json ของ Bili23 เปิด Bili23 อย่างน้อยหนึ่งครั้ง หรือตั้ง BILI_CONFIG'
+      if (!auth) {
+        if (this.loading) return 'กำลังตรวจสถานะบัญชี Bilibili…'
+        return this.error ? `ตรวจสถานะบัญชี Bilibili ไม่ได้: ${this.error}` : 'ยังไม่ได้ตรวจสถานะบัญชี Bilibili'
+      }
+      if (!auth.config) return 'เครื่องนี้ไม่มี Bili23 (ไม่พบ config.json) จึงดาวน์โหลดและล็อกอิน Bilibili ไม่ได้'
       if (auth.valid) return `เข้าสู่ระบบ Bilibili เป็น ${auth.username}${auth.vip ? ` · ${auth.vip}` : ''}`
       if (auth.saved && auth.valid === false) return 'cookie Bilibili ที่บันทึกไว้หมดอายุแล้ว ต้องเข้าสู่ระบบใหม่'
       if (auth.saved) return `มี cookie ของ uid ${auth.uid} แต่ตรวจกับ Bilibili ไม่ได้`
@@ -37,7 +40,13 @@ const BiliAccount = {
     say(text, kind = 'info') { this.$emit('notify', text, kind) },
     async load() {
       this.loading = true
-      try { this.auth = await this.api('/api/bili/login/status') } catch (error) { this.say(error.message, 'error') } finally { this.loading = false }
+      this.error = ''
+      try { this.auth = await this.api('/api/bili/login/status') } catch (error) {
+        this.auth = null
+        // The page is served from disk, so after a `git pull` it can be newer
+        // than the still-running server, which lacks this route.
+        this.error = error.message === 'not found' ? 'เว็บเซิร์ฟเวอร์ยังรันโค้ดเวอร์ชันเก่าอยู่ ต้องรีสตาร์ตเซิร์ฟเวอร์ก่อนจึงจะใช้ได้' : error.message
+      } finally { this.loading = false }
     },
     async start() {
       this.stopPolling()
@@ -90,9 +99,11 @@ const BiliAccount = {
   template: `
     <div class="bl-account" :class="tone">
       <div class="bl-line"><span class="bl-spinner" v-if="loading && !auth"></span><b>{{text}}</b></div>
+      <p class="bl-hint" v-if="auth && !auth.config">ติดตั้งและเปิด Bili23 (พร้อม MCP) บนเครื่องที่รันเว็บนี้ หรือตั้ง BILI_CONFIG ให้ชี้ไปที่ config.json ของ Bili23 ระหว่างนี้ใช้ Google Drive หรือ BitTorrent แทนได้</p>
       <p class="bl-hint" v-if="auth && !auth.valid && auth.config">ถ้าไม่ล็อกอิน จะดาวน์โหลดได้เฉพาะคุณภาพต่ำ ส่วนเนื้อหา VIP จะดาวน์โหลดไม่ได้</p>
       <p class="bl-hint warn" v-if="needsRestart">Bili23 ยังใช้ cookie ชุดเดิมอยู่ ต้องรีสตาร์ต Bili23 ก่อน ระบบจึงจะใช้บัญชีนี้ดาวน์โหลด</p>
       <p class="bl-hint warn" v-if="auth?.bili23_error" :title="auth.bili23_error">ติดต่อ Bili23 ไม่ได้ (ยังไม่ได้เปิด Bili23 หรือ MCP)</p>
+      <div class="bl-actions" v-if="!auth && error && !loading"><button class="ghost" @click="load">ลองอีกครั้ง</button></div>
       <div class="bl-actions" v-if="auth?.config">
         <button @click="start">{{auth.valid ? 'เปลี่ยนบัญชี' : 'เข้าสู่ระบบด้วย QR'}}</button>
         <button v-if="needsRestart" @click="restart" :disabled="restarting">{{restarting ? 'กำลังรีสตาร์ต…' : 'รีสตาร์ต Bili23'}}</button>
