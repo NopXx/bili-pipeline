@@ -62,6 +62,23 @@ def control_tasks(action, task_ids):
     return failed
 
 
+def update_job_state(**values):
+    """Merge values into the web job's state file so the queue card shows them."""
+    state_path = os.environ.get("BILI_JOB_STATE")
+    if not state_path:
+        return
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    data.update(values)
+    tmp = state_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, state_path)
+
+
 def cancel_tasks(task_ids):
     return control_tasks("cancel", task_ids)
 
@@ -215,17 +232,16 @@ def main():
         log("nothing created (all duplicates?) — pass BILI_REDOWNLOAD=1 to force")
         return
     task_ids = [t["task_id"] for t in tasks]
-    if state_path := os.environ.get("BILI_JOB_STATE"):
-        tmp = state_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"task_ids": task_ids}, f)
-        os.replace(tmp, state_path)
+    titles = [t.get("title") or "" for t in tasks]
+    title = titles[0] + (f" (+{len(titles) - 1} ตอน)" if len(titles) > 1 else "")
+    update_job_state(task_ids=task_ids, title=title, phase="bilibili", status="downloading", progress=0)
     log(f"created {len(task_ids)} task(s), waiting…")
     for task in tasks:
         log(f"task {task['task_id']}: {task.get('title') or 'untitled'}")
 
     done = {}
     previous = {}
+    sizes = {}  # task -> (downloaded, total, speed) for the combined job progress
     while len(done) < len(task_ids):
         time.sleep(2)
         for tid in task_ids:
@@ -262,6 +278,21 @@ def main():
                     except (TypeError, ValueError, ZeroDivisionError):
                         pass
                 log(f"task {tid}: {status} | " + " | ".join(details))
+                try:
+                    sizes[tid] = (float(downloaded or 0), float(total or 0), float(speed or 0))
+                except (TypeError, ValueError):
+                    pass
+        if sizes:
+            got = sum(item[0] for item in sizes.values())
+            want = sum(item[1] for item in sizes.values())
+            rate = sum(item[2] for tid, item in sizes.items() if tid not in done)
+            eta = f"{int((want - got) / rate)}s" if rate and want > got else ""
+            update_job_state(
+                progress=int(got * 100 / want) if want else 0,
+                done=fmt_bytes(got), total=fmt_bytes(want),
+                speed=f"{fmt_bytes(rate)}/s" if rate else "", eta=eta,
+                file_index=len(done) + (len(done) < len(task_ids)), file_count=len(task_ids),
+            )
 
     for path in done.values():
         if path and os.path.exists(path):

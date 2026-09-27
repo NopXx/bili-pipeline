@@ -60,7 +60,7 @@ BILI_AUDIO_QUALITIES = ("auto", "HI_RES", "DOLBY_ATMOS", "192K", "132K", "64K")
 BILI_CONTAINERS = ("mp4", "mkv")
 JOB_DETAIL_KEYS = ("phase", "error", "exit_code", "speed", "eta", "done", "total", "peers",
                    "downloaded_bytes", "total_bytes", "speed_bytes", "current_file", "file_index", "file_count",
-                   "destination")
+                   "destination", "title")
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(TORRENT_DOWNLOADS_DIR, exist_ok=True)

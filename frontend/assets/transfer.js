@@ -20,6 +20,7 @@ const PROGRESS_LINE = [
   /^\[#[0-9a-f]+ .*\]$/i,
   /^\S*\s*\d{1,3}(\.\d+)?%\s+\d{1,2}:\d{2}:\d{2}/,
   /^Transferred:/,
+  /^\[[^\]]+\] task [\w-]+: [a-z_]+ \| \d{1,3}% \|/,
 ]
 // Values Bili23's create_download accepts; "auto" follows Bili23's own
 // priority list. Anything above 1080P (and Hi-Res/Dolby audio) needs a VIP login.
@@ -130,6 +131,7 @@ createApp({
       return ''
     },
     logHiddenCount() { return this.logLines.length - this.logFiltered.length },
+    logVisible() { return this.logFiltered.length > MAX_RENDERED ? this.logFiltered.slice(-MAX_RENDERED) : this.logFiltered },
   },
   watch: {
     view(value) { if (value === 'files') this.loadFiles() },
@@ -209,6 +211,7 @@ createApp({
     laneOf(job) { return job.lane === 'upload' || job.kind === 'upload' ? 'upload' : 'download' },
     kindLabel(job) { return KIND[job.kind] || job.kind || job.lane },
     jobLabel(job) {
+      if (job.details?.title) return job.details.title
       const value = String(job.url || job.job)
       if (value.startsWith('magnet:')) {
         const name = new URLSearchParams(value.slice(value.indexOf('?') + 1)).get('dn')
@@ -216,7 +219,9 @@ createApp({
       }
       const drive = value.match(/drive\.google\.com\/.*?(?:\/d\/|[?&]id=)([\w-]+)/)
       if (drive) return `Drive file ${drive[1]}`
-      try { return decodeURIComponent(value.split(/[/\\]/).filter(Boolean).pop() || job.job) } catch { return value }
+      // Drop ?query / #hash first: tracking parameters are not a name.
+      const path = value.split(/[?#]/)[0]
+      try { return decodeURIComponent(path.split(/[/\\]/).filter(Boolean).pop() || job.job) } catch { return path }
     },
     showPercent(job) { return ['running', 'paused'].includes(job.status) || (+job.progress > 0 && GROUP[job.status] !== 'done') },
     jobFacts(job) {
