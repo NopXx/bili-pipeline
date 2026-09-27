@@ -183,6 +183,8 @@
                   <input type="checkbox" :checked="remoteVideos.every(f => remote.selected.includes(f.path))" :indeterminate.prop="remoteVideos.some(f => remote.selected.includes(f.path)) && !remoteVideos.every(f => remote.selected.includes(f.path))"
                     @change="remote.selected = $event.target.checked ? [...new Set([...remote.selected, ...remoteVideos.map(f => f.path)])] : remote.selected.filter(p => !remoteVideos.some(f => f.path === p))"> วิดีโอทั้งหมดในโฟลเดอร์นี้
                 </label>
+                <button class="ghost small" v-if="remote.items.some(f => f.dir)" @click="selectRemoteTree" :disabled="remote.busy"
+                  title="เลือกวิดีโอในโฟลเดอร์ย่อยทั้งหมด เช่น ซีรีส์ที่เก็บตอนละโฟลเดอร์ (ข้ามตอนที่แปลงแล้ว)">เลือกทั้งหมดรวมโฟลเดอร์ย่อย</button>
                 <span class="grow"></span>
                 <select v-model="remoteSort" class="small-select" aria-label="เรียงไฟล์">
                   <option value="name">ชื่อ A–Z</option>

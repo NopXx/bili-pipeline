@@ -442,6 +442,19 @@ createApp({
       } catch (error) { this.fail(error) } finally { this.remote.probing = false }
       if (this.remote.selected.some(p => !this.remote.probes[p])) this.probeRemote()
     },
+    // Select every video below this folder (a series stored one folder per
+    // episode), skipping the ones whose HLS is already on Drive.
+    async selectRemoteTree() {
+      this.remote.busy = true
+      try {
+        const r = await this.api('/api/remote/list', { path: this.remote.path, recursive: true })
+        const fresh = r.items.filter(f => !f.converted)
+        for (const f of r.items) this.remote.sizes[f.path] = f.size
+        this.remote.selected = [...new Set([...this.remote.selected, ...fresh.map(f => f.path)])]
+        const skipped = r.items.length - fresh.length
+        this.notify(`เลือก ${fresh.length} ไฟล์${skipped ? ` · ข้าม ${skipped} ไฟล์ที่แปลงแล้ว` : ''}`, fresh.length ? 'ok' : 'error')
+      } catch (error) { this.fail(error) } finally { this.remote.busy = false }
+    },
     async queueRemote() {
       const paths = [...this.remote.selected]
       if (!paths.length) return

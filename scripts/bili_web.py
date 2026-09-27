@@ -1059,6 +1059,8 @@ class H(BaseHTTPRequestHandler):
             relative = remote_relative(body.get("path"))
         except ValueError as exc:
             return self._send(400, json.dumps({"error": str(exc)}))
+        if body.get("recursive") is True:
+            return self.handle_remote_list_videos(relative)
         result = subprocess.run(["rclone", "lsjson", remote_spec(relative), "--no-mimetype"],
                                 capture_output=True, text=True, timeout=120)
         if result.returncode:
@@ -1074,6 +1076,36 @@ class H(BaseHTTPRequestHandler):
             })
         items.sort(key=lambda item: (not item["dir"], item["name"].lower()))
         self._send(200, json.dumps({"remote": RCLONE_REMOTE, "path": relative, "items": items}))
+
+    def handle_remote_list_videos(self, relative):
+        """Every video under a folder (a whole series, one folder per episode
+        or not), flagged `converted` when its HLS playlist is already where
+        this app would upload it."""
+        patterns = ["*" + ext for ext in VIDEO_EXTENSIONS] + ["*.m3u8"]
+        command = ["rclone", "lsjson", remote_spec(relative), "--no-mimetype", "-R", "--files-only"]
+        for pattern in patterns:
+            command += ["--include", pattern]
+        result = subprocess.run(command + ["--ignore-case"], capture_output=True, text=True, timeout=300)
+        if result.returncode:
+            return self._send(502, json.dumps({"error": (result.stderr or "rclone lsjson failed").strip()[-500:]}))
+        entries = json.loads(result.stdout or "[]")
+        full = lambda entry: f"{relative}/{entry['Path']}" if relative else entry["Path"]
+        playlist_dirs = {posixpath.dirname(full(e)) for e in entries if e["Name"].lower().endswith(".m3u8")}
+        items = []
+        for entry in entries:
+            path = full(entry)
+            lower = entry["Name"].lower()
+            if not lower.endswith(VIDEO_EXTENSIONS):
+                continue
+            # HLS segments beside a playlist are not sources.
+            if posixpath.dirname(path) in playlist_dirs and (lower.endswith(".ts") or lower.startswith("init")):
+                continue
+            stem = posixpath.splitext(entry["Name"])[0].rstrip(" .")  # as process_media names bundles
+            items.append({"name": entry["Name"], "path": path, "dir": False, "size": entry.get("Size", 0),
+                          "modified": entry.get("ModTime", ""), "video": True,
+                          "converted": hls_remote_dir(path, stem) in playlist_dirs})
+        items.sort(key=lambda item: item["path"].lower())
+        self._send(200, json.dumps({"remote": RCLONE_REMOTE, "path": relative, "items": items[:2000]}))
 
     def handle_remote_queue(self, body):
         if not RCLONE_REMOTE:

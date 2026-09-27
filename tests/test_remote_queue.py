@@ -186,6 +186,30 @@ class RemoteQueueTests(unittest.TestCase):
             web.finish_remote_pipeline(item, {"remote_source": "Show/S1/E01.mkv", "delete_remote_source": True}, [str(bundle)], ["Show/S1/E01"])
         self.assertEqual(calls[0][2], "metube:tube/Show/S1/E01")
 
+    def test_recursive_list_selects_series_videos_and_flags_converted(self):
+        web = self.web
+        listing = [
+            {"Path": "S1 EP-01/S1 EP-01.m3u8", "Name": "S1 EP-01.m3u8", "Size": 1},
+            {"Path": "S1 EP-01/S1 EP-01.mkv", "Name": "S1 EP-01.mkv", "Size": 10},
+            {"Path": "S1 EP-02/S1 EP-02.mkv", "Name": "S1 EP-02.mkv", "Size": 20},
+            {"Path": "S2/E01.mkv", "Name": "E01.mkv", "Size": 30},
+            {"Path": "S2/E01/E01.m3u8", "Name": "E01.m3u8", "Size": 1},
+            {"Path": "S2/E02.mkv", "Name": "E02.mkv", "Size": 40},
+            {"Path": "Old/Old.m3u8", "Name": "Old.m3u8", "Size": 1},
+            {"Path": "Old/seg0.ts", "Name": "seg0.ts", "Size": 5},
+        ]
+        sent = []
+        handler = web.H.__new__(web.H)
+        handler._send = lambda code, body: sent.append((code, json.loads(body)))
+        run = lambda command, **kw: subprocess.CompletedProcess(command, 0, json.dumps(listing), "")
+        with patch.object(web.subprocess, "run", run):
+            handler.handle_remote_list({"path": "Show", "recursive": True})
+        code, body = sent[0]
+        self.assertEqual(code, 200, body)
+        self.assertEqual({i["path"]: i["converted"] for i in body["items"]}, {
+            "Show/S1 EP-01/S1 EP-01.mkv": True, "Show/S1 EP-02/S1 EP-02.mkv": False,
+            "Show/S2/E01.mkv": True, "Show/S2/E02.mkv": False})
+
     def test_pages_pin_assets_to_their_content(self):
         web = self.web
         page = '<script src="/assets/studio.js"></script><link href="/assets/missing.css">'
