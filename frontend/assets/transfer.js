@@ -5,7 +5,7 @@ createApp({
     token: localStorage.getItem('bwt') || '', tab: 'download', source: 'drive', message: '',
     driveLink: '', torrentSource: '', torrentData: '', torrentFiles: [], selectedTorrent: [], inspectionJob: '', inspectionPending: false,
     biliUrl: '', episodes: [], selectedEpisodes: [], files: [], selectedFiles: [], jobs: [],
-    logJob: '', logText: '', timer: null,
+    logJob: '', logText: '', logRequest: 0, timer: null,
   } },
   watch: {
     tab(value) { if (value === 'files') this.loadFiles(); if (value === 'queue') this.loadJobs() },
@@ -86,8 +86,17 @@ createApp({
         this.message = `เพิ่มงานอัปโหลด ${result.job} แล้ว`; this.tab = 'queue'; this.loadJobs()
       } catch (error) { this.message = error.message }
     },
-    async loadJobs() { if (!this.token) return; try { this.jobs = (await this.api('/api/jobs')).filter(job => job.lane !== 'convert' && job.kind !== 'torrent_inspect') } catch (error) { this.message = error.message } },
-    async showLog(job) { try { this.logJob = job; this.logText = (await this.api('/api/status', { job })).log || '' } catch (error) { this.message = error.message } },
+    async loadJobs() { if (!this.token) return; try { this.jobs = (await this.api('/api/jobs')).filter(job => job.lane !== 'convert' && job.kind !== 'torrent_inspect').sort((a, b) => b.created.localeCompare(a.created) || b.job.localeCompare(a.job)) } catch (error) { this.message = error.message } },
+    async showLog(job) {
+      if (this.logJob !== job) { this.logJob = job; this.logText = 'กำลังโหลด log…' }
+      const request = ++this.logRequest
+      try {
+        const result = await this.api('/api/status', { job })
+        if (this.logJob === job && this.logRequest === request) this.logText = result.log || ''
+      } catch (error) {
+        if (this.logJob === job && this.logRequest === request) this.message = error.message
+      }
+    },
     async action(path, job) { try { await this.api(path, { job }); await this.loadJobs(); if (this.logJob === job) await this.showLog(job) } catch (error) { this.message = error.message } },
     pause(job) { return this.action('/api/pause', job) },
     resume(job) { return this.action('/api/resume', job) },
