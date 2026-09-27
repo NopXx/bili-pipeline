@@ -51,6 +51,9 @@
 .rung{display:grid;grid-template-columns:auto 1fr 110px;gap:10px;align-items:center;padding:4px 2px;cursor:pointer}
 .rung input:not([type=checkbox]){padding:5px 8px;font-size:13px}
 .rung.off{opacity:.4}
+.auto-rate{font-size:13px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.source.compact{padding:10px}
+.source.compact h3{margin-bottom:8px}
 .estimate{display:flex;flex-direction:column;gap:2px;background:#0c1017;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
 .estimate strong{font-size:17px}
 

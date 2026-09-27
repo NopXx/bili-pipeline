@@ -173,14 +173,28 @@
                 </template>
                 <button class="ghost small refresh" @click="loadRemote(remote.path)" :disabled="remote.busy"><span class="spinner dim" v-if="remote.busy"></span>รีเฟรช</button>
               </div>
+              <div class="toolbar">
+                <label class="check" v-if="remoteVideos.length">
+                  <input type="checkbox" :checked="remoteVideos.every(f => remote.selected.includes(f.path))" :indeterminate.prop="remoteVideos.some(f => remote.selected.includes(f.path)) && !remoteVideos.every(f => remote.selected.includes(f.path))"
+                    @change="remote.selected = $event.target.checked ? [...new Set([...remote.selected, ...remoteVideos.map(f => f.path)])] : remote.selected.filter(p => !remoteVideos.some(f => f.path === p))"> วิดีโอทั้งหมดในโฟลเดอร์นี้
+                </label>
+                <span class="grow"></span>
+                <select v-model="remoteSort" class="small-select" aria-label="เรียงไฟล์">
+                  <option value="name">ชื่อ A–Z</option>
+                  <option value="name-desc">ชื่อ Z–A</option>
+                  <option value="video">วิดีโอก่อน</option>
+                  <option value="size">ใหญ่สุดก่อน</option>
+                  <option value="modified">ใหม่สุดก่อน</option>
+                </select>
+              </div>
               <div class="note-bad" v-if="remote.error">{{remote.error}}</div>
               <div class="files">
                 <div class="row" v-if="remote.path" @click="loadRemote(remoteCrumbs.at(-2).path)"><span class="name">⬆ ย้อนกลับ</span></div>
-                <template v-for="f in remote.items" :key="f.path">
+                <template v-for="f in remoteItems" :key="f.path">
                   <div class="row" v-if="f.dir" @click="loadRemote(f.path)"><span>📁</span><span class="name">{{f.name}}</span></div>
                   <label class="row" v-else :class="{off: !f.video}">
                     <input type="checkbox" :value="f.path" v-model="remote.selected" :disabled="!f.video">
-                    <span class="name">{{f.name}}</span><span class="size">{{size(f.size)}}</span>
+                    <span class="name">{{f.name}}</span><span class="when" v-if="f.modified">{{modifiedLabel(f.modified)}}</span><span class="size">{{size(f.size)}}</span>
                   </label>
                 </template>
                 <div class="empty" v-if="!remote.items.length && !remote.busy && !remote.error">โฟลเดอร์นี้ว่าง</div>
@@ -189,13 +203,29 @@
                 <span>เลือก {{remote.selected.length}} ไฟล์ · {{size(remoteSelectedSize)}}</span>
                 <button class="ghost small" @click="remote.selected = []">ล้าง</button>
               </div>
+              <div class="note-muted" v-if="remote.probing"><span class="spinner dim"></span> กำลังอ่านข้อมูลไฟล์บน Drive (ไม่ต้องดาวน์โหลด)…</div>
+              <div class="note-bad" v-for="m in remoteProbeErrors" :key="m.path">อ่านข้อมูล {{m.name}} ไม่ได้: {{m.error}}</div>
+              <div class="sources" v-if="remoteProbe.length">
+                <article class="source compact" v-for="m in remoteProbe" :key="m.path">
+                  <div class="source-head">
+                    <h3>{{m.name}}</h3>
+                    <span class="tag" :class="m.video.hdr ? 'hdr' : ''">{{m.video.hdr ? 'HDR' : 'SDR'}}</span>
+                  </div>
+                  <div class="facts">
+                    <div><small>วิดีโอ</small>{{m.video.codec}} · {{m.video.width}}×{{m.video.height}}</div>
+                    <div><small>Bitrate วิดีโอ</small>{{sourceBitrate(m)}}</div>
+                    <div><small>ความยาว</small>{{clock(m.duration)}}</div>
+                    <div><small>เสียง</small><span v-for="(a, i) in m.audio" :key="a.index">{{i ? ' · ' : ''}}{{a.language}} {{a.codec}} {{a.channels}}ch{{a.default ? ' ★' : ''}}</span></div>
+                  </div>
+                </article>
+              </div>
               <p class="hint">แต่ละไฟล์เป็นงานของตัวเอง: ดาวน์โหลด (ตรวจ header ก่อน, ffprobe หลัง) → แปลง HLS ตามค่าด้านขวา → อัปโหลดไว้ข้างต้นฉบับ</p>
             </div>
           </section>
 
           <aside class="card sticky" v-if="source === 'library'">
             <h2>ตั้งค่า HLS</h2>
-            <hls-config :config="config">
+            <hls-config :config="config" :probe="remoteProbe">
               <div class="option-flags" style="margin-top:10px">
                 <label class="check"><input type="checkbox" v-model="remote.deleteSource"> ลบไฟล์ต้นฉบับบน Drive เมื่อสำเร็จ</label>
               </div>

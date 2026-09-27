@@ -3,7 +3,7 @@ const { GROUP, FILTERS, ACTIVE } = Shared
 
 // --- HLS profile ---------------------------------------------------------------
 const HLS_DEFAULTS = {
-  mode: 'copy', height: 1080, videoBitrate: '8M', gpuTonemap: true,
+  mode: 'copy', height: 1080, videoBitrate: '8M', gpuTonemap: true, autoBitrate: true,
   rungs: [{ h: 'raw', on: false, rate: '' }, { h: 2160, on: true, rate: '16M' }, { h: 1440, on: true, rate: '10M' },
     { h: 1080, on: true, rate: '8M' }, { h: 720, on: false, rate: '4M' }, { h: 480, on: false, rate: '2M' }],
   audio: ['2', 'raw'], audioBitrate: 'auto', segment: 6, poster: 5, upload: true, keepLocal: false,
@@ -21,7 +21,8 @@ function hlsProfile(c) {
     copy_video: c.mode === 'copy', reencode: c.mode === 'encode', auto_hdr: c.mode === 'hdr_auto',
     preserve_hdr: c.mode === 'preserve', height: c.mode === 'encode' ? +c.height : 0, ladder: c.mode === 'ladder',
     ladder_heights: rungs.map(r => r.h).join(','),
-    ladder_bitrates: rungs.filter(r => r.h !== 'raw').map(r => `${r.h}:${r.rate}`).join(','),
+    // 'auto' lets the engine cap each rung at that file's own source bitrate.
+    ladder_bitrates: rungs.filter(r => r.h !== 'raw').map(r => `${r.h}:${c.autoBitrate ? 'auto' : r.rate}`).join(','),
     video_bitrate: c.videoBitrate, audio_channels: c.audio.join(','), audio_bitrate: c.audioBitrate,
     segment_seconds: +c.segment, poster_seconds: +c.poster, gpu_tonemap: c.gpuTonemap || c.mode === 'hdr_auto',
     copy_audio: c.audio.includes('raw'), upload: c.upload, keep_local: c.keepLocal,
@@ -47,7 +48,7 @@ const HlsConfig = {
         if (c.mode === 'copy') video = this.sourceRate(m)
         else if (c.mode === 'encode' || c.mode === 'preserve') video = this.rate(c.videoBitrate)
         else if (c.mode === 'hdr_auto') video = this.sourceRate(m) + this.rate(this.suggested(1080, m)) + this.rate(this.suggested(720, m))
-        else video = c.rungs.filter(r => r.on && r.h !== 'raw' && +r.h <= this.maxHeight).reduce((n, r) => n + this.rate(r.rate), 0) +
+        else video = c.rungs.filter(r => r.on && r.h !== 'raw' && +r.h <= this.maxHeight).reduce((n, r) => n + this.rate(c.autoBitrate ? this.suggested(r.h, m) : r.rate), 0) +
           (c.rungs.some(r => r.on && r.h === 'raw') ? this.sourceRate(m) : 0)
         const audio = c.audio.reduce((n, a) => n + (a === 'raw' ? m.audio.reduce((s, x) => s + (+x.bit_rate || 640000), 0) : this.audioRate(+a) * m.audio.length), 0)
         total += (video + audio) * (+m.duration || 0) / 8
@@ -81,7 +82,8 @@ const HlsConfig = {
     },
     configureFromProbe() {
       if (!this.probe.length) return
-      for (const r of this.config.rungs) if (r.h !== 'raw') { r.on = +r.h <= this.maxHeight && [2160, 1440, 1080].includes(+r.h); r.rate = this.suggested(+r.h) }
+      for (const r of this.config.rungs) if (r.h !== 'raw') { r.on = r.on && +r.h <= this.maxHeight; r.rate = this.suggested(+r.h) }
+      if (!this.config.rungs.some(r => r.on && r.h !== 'raw')) for (const r of this.config.rungs) if (r.h !== 'raw' && +r.h <= this.maxHeight && +r.h >= 720) r.on = true
       const target = this.availableHeights[0] || 0
       this.config.height = target
       this.config.videoBitrate = this.suggested(target || this.maxHeight)
@@ -121,11 +123,15 @@ const HlsConfig = {
         </div>
         <p class="hint" v-if="config.mode === 'hdr_auto'">เก็บต้นฉบับ 4K HDR และสร้าง 1080p/720p SDR · tonemap ด้วย GPU เมื่อพร้อม ไม่พร้อมจะใช้ CPU</p>
         <p class="hint" v-if="config.mode === 'copy'">ไฟล์ H.264 คัดลอกสตรีมโดยไม่เข้ารหัสใหม่ · codec อื่นจะถูกแปลงเป็น H.264 ที่ความละเอียดเดิม</p>
+        <label class="check" v-if="config.mode === 'ladder'">
+          <input type="checkbox" v-model="config.autoBitrate"> bitrate อัตโนมัติ: ไม่เกินต้นฉบับ คำนวณแยกทีละไฟล์
+        </label>
         <div class="rungs" v-if="config.mode === 'ladder'">
           <label class="rung" v-for="r in config.rungs" :key="r.h" :class="{off: r.h !== 'raw' && +r.h > maxHeight}">
             <input type="checkbox" v-model="r.on" :disabled="r.h !== 'raw' && +r.h > maxHeight">
             <span>{{r.h === 'raw' ? 'ต้นฉบับ (raw)' : r.h + 'p'}}</span>
-            <input v-if="r.h !== 'raw'" v-model="r.rate" :disabled="!r.on || +r.h > maxHeight" aria-label="bitrate">
+            <span v-if="r.h !== 'raw' && config.autoBitrate" class="auto-rate">{{probe.length ? '≈ ' + suggested(r.h) : 'auto'}}</span>
+            <input v-else-if="r.h !== 'raw'" v-model="r.rate" :disabled="!r.on || +r.h > maxHeight" aria-label="bitrate">
             <small v-else class="muted">คัดลอกสตรีมเดิม</small>
           </label>
         </div>
@@ -179,7 +185,8 @@ createApp({
     torrentSource: '', torrentData: '', torrentFileName: '', torrentName: '', torrentFiles: [], selectedTorrent: [], torrentFilter: '',
     inspectionJob: '', inspectionPending: false,
     driveLink: '',
-    remote: { root: '', path: '', items: [], selected: [], sizes: {}, busy: false, error: '', loaded: false, deleteSource: false },
+    remote: { root: '', path: '', items: [], selected: [], sizes: {}, busy: false, error: '', loaded: false, deleteSource: false, probes: {}, probing: false },
+    remoteProbeTimer: null, remoteSort: Shared.load('studio-remote-sort', 'name'),
     files: [], selectedFiles: [], fileSearch: '', fileSort: 'modified', filesLoadedAt: 0,
     convertFiles: [], probe: [], probeBusy: false, inspected: [],
     config: { ...structuredClone(HLS_DEFAULTS), ...Shared.load('studio-hls', {}) },
@@ -224,6 +231,22 @@ createApp({
       const parts = this.remote.path ? this.remote.path.split('/') : []
       return [{ name: this.remote.root || 'Drive', path: '' }, ...parts.map((name, i) => ({ name, path: parts.slice(0, i + 1).join('/') }))]
     },
+    remoteProbe() { return this.remote.selected.map(p => this.remote.probes[p]).filter(m => m && !m.error) },
+    remoteProbeErrors() { return this.remote.selected.map(p => this.remote.probes[p]).filter(m => m?.error) },
+    // Folders first, then files in the chosen order (names compare numerically: E2 < E10).
+    remoteItems() {
+      const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      const sorters = {
+        name: byName,
+        'name-desc': (a, b) => byName(b, a),
+        size: (a, b) => (b.size || 0) - (a.size || 0) || byName(a, b),
+        modified: (a, b) => String(b.modified).localeCompare(String(a.modified)) || byName(a, b),
+        video: (a, b) => (b.video - a.video) || byName(a, b),
+      }
+      const dirs = this.remote.items.filter(f => f.dir).sort(byName)
+      return [...dirs, ...this.remote.items.filter(f => !f.dir).sort(sorters[this.remoteSort] || byName)]
+    },
+    remoteVideos() { return this.remote.items.filter(f => !f.dir && f.video) },
     remoteSelectedSize() { return this.remote.selected.reduce((n, p) => n + (+this.remote.sizes[p] || 0), 0) },
     visibleFiles() {
       const q = this.fileSearch.trim().toLowerCase()
@@ -242,6 +265,8 @@ createApp({
     },
     source(value) { if (value === 'library' && !this.remote.loaded) this.loadRemote('') },
     torrentSource() { this.resetTorrent() },
+    remoteSort(value) { Shared.save('studio-remote-sort', value) },
+    'remote.selected'() { clearTimeout(this.remoteProbeTimer); this.remoteProbeTimer = setTimeout(() => this.probeRemote(), 700) },
     biliOptions: { deep: true, handler(value) { Shared.save('studio-bili-options', { ...value, redownload: false }) } },
     config: { deep: true, handler(value) { Shared.save('studio-hls', value) } },
   },
@@ -249,6 +274,7 @@ createApp({
     size: Shared.size, clock: Shared.clock, bitrate: Shared.bitrate,
     basename: Shared.basename, dirname: Shared.dirname,
     ago(epoch) { return Shared.ago(epoch, this.now) },
+    modifiedLabel(iso) { const t = Date.parse(iso); return Number.isFinite(t) ? Shared.ago(t / 1000, this.now) : '' },
     fps(v) { const p = String(v || '').split('/').map(Number); return p.length === 2 && p[1] ? (p[0] / p[1]).toFixed(3).replace(/0+$/, '').replace(/\.$/, '') : v || '?' },
     sourceBitrate(m) {
       const audio = (m.audio || []).reduce((n, a) => n + (+a.bit_rate || 0), 0)
@@ -399,6 +425,16 @@ createApp({
         for (const f of r.items) if (!f.dir) this.remote.sizes[f.path] = f.size
         this.remote.loaded = true
       } catch (error) { this.remote.error = error.message } finally { this.remote.busy = false }
+    },
+    // Read codec/bitrate/HDR/audio of selected Drive files without downloading them.
+    async probeRemote() {
+      const missing = this.remote.selected.filter(p => !this.remote.probes[p]).slice(0, 10)
+      if (!missing.length || this.remote.probing) return
+      this.remote.probing = true
+      try {
+        for (const m of await this.api('/api/remote/probe', { paths: missing })) this.remote.probes[m.path] = m
+      } catch (error) { this.fail(error) } finally { this.remote.probing = false }
+      if (this.remote.selected.some(p => !this.remote.probes[p])) this.probeRemote()
     },
     async queueRemote() {
       const paths = [...this.remote.selected]

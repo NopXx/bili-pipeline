@@ -24,10 +24,12 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from urllib.parse import parse_qs, unquote, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from job_queue import JobQueue
@@ -88,6 +90,85 @@ HLS_OPTION_KEYS = {
     "audio_channels", "audio_bitrate", "segment_seconds", "poster_seconds",
     "gpu_tonemap", "copy_audio", "upload", "keep_local",
 }
+
+
+def stop_process_group(process, timeout=10):
+    """SIGTERM a process started with start_new_session=True and all its children."""
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM) if hasattr(os, "killpg") else process.terminate()
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL) if hasattr(os, "killpg") else process.kill()
+        process.wait(timeout=timeout)
+    except ProcessLookupError:
+        pass
+
+
+def probe_media(target, path, name, timeout=30):
+    """ffprobe summary of one media file (a local path or an http URL) for the UI."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", target],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or "ffprobe failed").strip()[-800:])
+    info = json.loads(result.stdout)
+    streams = info.get("streams") or []
+    fmt = info.get("format") or {}
+    video_stream = next((item for item in streams if item.get("codec_type") == "video"), {})
+    audio_streams = [item for item in streams if item.get("codec_type") == "audio"]
+    subtitles = [item for item in streams if item.get("codec_type") == "subtitle"]
+
+    def number(value):
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def first_packet(selector):
+        packet = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", selector,
+             "-read_intervals", "%+#1", "-show_packets", "-show_entries",
+             "packet=pts_time", "-of", "default=nw=1:nk=1", target],
+            capture_output=True, text=True, timeout=max(15, timeout // 2),
+        )
+        return number((packet.stdout or "0").splitlines()[0] if packet.stdout else 0)
+
+    side_data = video_stream.get("side_data_list") or []
+    transfer = video_stream.get("color_transfer") or ""
+    return {
+        "path": path, "name": name,
+        "size": int(number(fmt.get("size"))),
+        "duration": number(fmt.get("duration")),
+        "bit_rate": int(number(fmt.get("bit_rate"))),
+        "video": {
+            "codec": video_stream.get("codec_name"), "profile": video_stream.get("profile"),
+            "width": video_stream.get("width"), "height": video_stream.get("height"),
+            "pix_fmt": video_stream.get("pix_fmt"),
+            "fps": video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate"),
+            "bit_rate": int(number(video_stream.get("bit_rate"))),
+            "hdr": transfer in ("smpte2084", "arib-std-b67"),
+            "dolby_vision": any("dovi" in str(x).lower() or "dolby vision" in str(x).lower() for x in side_data),
+            "first_packet": first_packet("v:0"),
+        },
+        "audio": [{
+            "index": index + 1, "codec": stream.get("codec_name"), "profile": stream.get("profile"),
+            "channels": stream.get("channels"), "layout": stream.get("channel_layout"),
+            "sample_rate": int(number(stream.get("sample_rate"))),
+            "bit_rate": int(number(stream.get("bit_rate"))),
+            "language": (stream.get("tags") or {}).get("language", "und"),
+            "title": (stream.get("tags") or {}).get("title") or (stream.get("tags") or {}).get("name", ""),
+            "default": bool((stream.get("disposition") or {}).get("default")),
+            "first_packet": first_packet(f"a:{index}"),
+        } for index, stream in enumerate(audio_streams)],
+        "subtitles": [{
+            "codec": stream.get("codec_name"),
+            "language": (stream.get("tags") or {}).get("language", "und"),
+            "title": (stream.get("tags") or {}).get("title", ""),
+        } for stream in subtitles],
+    }
 
 
 def enqueue_process(body, pipeline=None):
@@ -641,6 +722,7 @@ class H(BaseHTTPRequestHandler):
         "/api/drive/download": "handle_drive_download",
         "/api/remote/list": "handle_remote_list",
         "/api/remote/queue": "handle_remote_queue",
+        "/api/remote/probe": "handle_remote_probe",
         "/api/status": "handle_status",
         "/api/log": "handle_log",
         "/api/cancel": "handle_cancel",
@@ -1137,67 +1219,57 @@ class H(BaseHTTPRequestHandler):
             path = os.path.realpath(supplied)
             if not path.startswith(DOWNLOADS_DIR + os.sep) or not os.path.isfile(path):
                 return self._send(400, json.dumps({"error": f"invalid downloaded file: {supplied}"}))
-            result = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", path],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                return self._send(422, json.dumps({"error": (result.stderr or "ffprobe failed").strip()[-800:]}))
-            info = json.loads(result.stdout)
-            streams = info.get("streams") or []
-            fmt = info.get("format") or {}
-            video_stream = next((item for item in streams if item.get("codec_type") == "video"), {})
-            audio_streams = [item for item in streams if item.get("codec_type") == "audio"]
-            subtitles = [item for item in streams if item.get("codec_type") == "subtitle"]
-
-            def number(value):
-                try:
-                    return float(value or 0)
-                except (TypeError, ValueError):
-                    return 0
-
-            def first_packet(selector):
-                packet = subprocess.run(
-                    ["ffprobe", "-v", "error", "-select_streams", selector,
-                     "-read_intervals", "%+#1", "-show_packets", "-show_entries",
-                     "packet=pts_time", "-of", "default=nw=1:nk=1", path],
-                    capture_output=True, text=True, timeout=15,
-                )
-                return number((packet.stdout or "0").splitlines()[0] if packet.stdout else 0)
-
-            side_data = video_stream.get("side_data_list") or []
-            transfer = video_stream.get("color_transfer") or ""
-            output.append({
-                "path": path, "name": os.path.basename(path),
-                "size": int(number(fmt.get("size"))),
-                "duration": number(fmt.get("duration")),
-                "bit_rate": int(number(fmt.get("bit_rate"))),
-                "video": {
-                    "codec": video_stream.get("codec_name"), "profile": video_stream.get("profile"),
-                    "width": video_stream.get("width"), "height": video_stream.get("height"),
-                    "pix_fmt": video_stream.get("pix_fmt"),
-                    "fps": video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate"),
-                    "bit_rate": int(number(video_stream.get("bit_rate"))),
-                    "hdr": transfer in ("smpte2084", "arib-std-b67"),
-                    "dolby_vision": any("dovi" in str(x).lower() or "dolby vision" in str(x).lower() for x in side_data),
-                    "first_packet": first_packet("v:0"),
-                },
-                "audio": [{
-                    "index": index + 1, "codec": stream.get("codec_name"), "profile": stream.get("profile"),
-                    "channels": stream.get("channels"), "layout": stream.get("channel_layout"),
-                    "sample_rate": int(number(stream.get("sample_rate"))),
-                    "bit_rate": int(number(stream.get("bit_rate"))),
-                    "language": (stream.get("tags") or {}).get("language", "und"),
-                    "title": (stream.get("tags") or {}).get("title") or (stream.get("tags") or {}).get("name", ""),
-                    "first_packet": first_packet(f"a:{index}"),
-                } for index, stream in enumerate(audio_streams)],
-                "subtitles": [{
-                    "codec": stream.get("codec_name"),
-                    "language": (stream.get("tags") or {}).get("language", "und"),
-                    "title": (stream.get("tags") or {}).get("title", ""),
-                } for stream in subtitles],
-            })
+            try:
+                output.append(probe_media(path, path, os.path.basename(path)))
+            except RuntimeError as exc:
+                return self._send(422, json.dumps({"error": str(exc)}))
         self._send(200, json.dumps(output))
+
+    def handle_remote_probe(self, body):
+        """ffprobe files on the rclone remote without downloading them.
+
+        `rclone serve http` exposes the remote on a loopback port for the
+        duration of the request; ffprobe then reads over HTTP with range
+        requests — the headers, plus the tail of an MP4 whose index is at the end.
+        """
+        if not RCLONE_REMOTE:
+            return self._send(400, json.dumps({"error": "BILI_RCLONE_REMOTE is not configured"}))
+        try:
+            paths = [remote_relative(path) for path in (body.get("paths") or [])]
+        except ValueError as exc:
+            return self._send(400, json.dumps({"error": str(exc)}))
+        if not paths or len(paths) > 10 or any(not path.lower().endswith(VIDEO_EXTENSIONS) for path in paths):
+            return self._send(400, json.dumps({"error": "select between 1 and 10 video files"}))
+        with socket.socket() as probe_socket:
+            probe_socket.bind(("127.0.0.1", 0))
+            port = probe_socket.getsockname()[1]
+        server = subprocess.Popen(
+            ["rclone", "serve", "http", RCLONE_REMOTE, "--addr", f"127.0.0.1:{port}", "--read-only"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True,
+        )
+        try:
+            deadline = time.time() + 30
+            while True:
+                if server.poll() is not None:
+                    return self._send(502, json.dumps({"error": "rclone serve failed: " + (server.stderr.read() or "").strip()[-400:]}))
+                try:
+                    socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                    break
+                except OSError:
+                    if time.time() > deadline:
+                        return self._send(504, json.dumps({"error": "rclone serve did not start"}))
+                    time.sleep(0.3)
+            output = []
+            for relative in paths:
+                url = f"http://127.0.0.1:{port}/" + urllib.parse.quote(relative)
+                try:
+                    output.append(probe_media(url, relative, os.path.basename(relative), timeout=120))
+                except RuntimeError as exc:
+                    output.append({"path": relative, "name": os.path.basename(relative), "error": str(exc)})
+            self._send(200, json.dumps(output))
+        finally:
+            # Its own process group, so nothing rclone started outlives the request.
+            stop_process_group(server)
 
     def handle_jobs(self, body):
         del body
