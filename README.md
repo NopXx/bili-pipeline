@@ -5,8 +5,9 @@ Self-hosted pipeline that downloads video, converts it to browser-playable HLS, 
 ## What it does
 
 1. **Download** — Bilibili (via `bili_pull.py` / `pull.sh`) or **BitTorrent** (`torrent_download.py`, aria2: magnet or `.torrent`, resume/DHT/PEX).
-2. **Convert to HLS** — `public/prep-hls.sh` builds an fMP4 HLS bundle: video copy or re-encode (incl. HDR tonemap / preserve / ladder), per-language audio renditions, WebVTT subtitles, poster, and a `schemaVersion 2` `*.info.json` manifest (`public/write-info-json.py`).
+2. **Convert to HLS** — `public/prep-hls.sh` (the [hls-prep](https://github.com/NopXx/hls-prep) engine, plus a `PREP_REQUIRE_NVENC` guard) builds an fMP4 HLS bundle: video copy or re-encode (incl. HDR tonemap / preserve / ladder), per-language audio renditions, WebVTT subtitles, poster, and a `schemaVersion 2` `*.info.json` manifest. `process_media.py` translates the web UI's modes into its knobs (a sized encode is a one-rung ladder; HDR Auto is `raw,1080,720`; Preserve HDR is an `hdr` rung).
 3. **Upload to Drive** — each bundle (`drive_push.mjs`) or an original pre-HLS video (`drive_upload.mjs`, resumable) lands in its own Drive sub-folder, which the library treats as one series.
+4. **Drive queue** — with `BILI_RCLONE_REMOTE` set, the Google Drive tab browses the remote and queues many videos at once. Each becomes its own chain: download → HLS (the profile chosen on that page) → upload beside the original → optionally delete the remote original, which happens only after the uploaded playlist is visible on the remote. A failed item never deletes anything.
 
 Long-running work runs in independent queues: torrent inspection, download, HLS conversion, and Drive upload. Up to two downloads run concurrently by default; set `BILI_DOWNLOAD_CONCURRENCY` to an integer from 1 to 8 to change this. Inspection can read the next torrent's file list while downloads are active. A successful conversion enqueues a separate upload job, so upload can be paused while conversion continues. The UI shows the download, conversion, and upload lanes with progress and per-job controls.
 
@@ -20,7 +21,8 @@ On a host with two visible NVIDIA GPUs, two HLS conversions run at once, one per
 - `scripts/upload_media.py` — independently uploads finished HLS bundles or original files.
 - `scripts/{bili_pull.py,bili_login.py,pull.sh,torrent_download.py,drive_download.mjs}` — downloaders. Drive accepts a file link or ID, prefers the configured `BILI_RCLONE_REMOTE` (rclone `copyid`) and otherwise uses the existing OAuth connection. OAuth downloads resume a partial `.part` file on retry. Files land under `BILI_DOWNLOADS_DIR/drive/<file-id>/`.
 - `scripts/{drive_push.mjs,drive_upload.mjs,drive_files.mjs}` — Google Drive I/O (googleapis).
-- `public/{prep-hls.sh,write-info-json.py}` — the HLS builder and its manifest writer.
+- `public/prep-hls.sh` — the HLS builder (copied from hls-prep; update it from there).
+- `scripts/remote_fetch.py` — Drive-queue downloader: rclone copy with an MKV header check before and ffprobe verification after.
 - `lib/hls.js` — playlist/mime helpers shared by the uploaders.
 - `frontend/` — the web UI (`index.html` + `assets/app.js`), served by `bili_web.py`.
 

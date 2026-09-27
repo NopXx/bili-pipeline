@@ -9,14 +9,14 @@ const GROUP = {
   failed: 'failed', cancelled: 'failed', interrupted: 'failed', stopped: 'failed',
 }
 const FILTERS = { all: 'ทั้งหมด', running: 'กำลังทำงาน', waiting: 'รอคิว / หยุดไว้', done: 'เสร็จแล้ว', failed: 'ล้มเหลว / ยกเลิก' }
-const KIND = { torrent: 'BitTorrent', drive_download: 'Google Drive', download: 'Bilibili', upload: 'อัปโหลด' }
+const KIND = { torrent: 'BitTorrent', drive_download: 'Google Drive', remote_download: 'Drive (rclone)', download: 'Bilibili', upload: 'อัปโหลด' }
 
 // Log lines the workers print for live progress. The viewer folds them into a
 // single "live" line so messages and errors are not buried under thousands of
 // once-a-second updates.
 const PROGRESS_LINE = [
-  /^(torrent|drive|upload|hls|download)\s*\|\s*\d{1,3}(\.\d+)?%/i,
-  /\d{1,3}%,\s*[\d.]+\s*[kMGTPE]?i?B\/s/,
+  /^(torrent|drive|upload|hls|download|remote)\s*\|\s*\d{1,3}(\.\d+)?%/i,
+  /\d{1,3}%,\s*[\d.]+\s*[kKMGTPE]?i?B\/s/,
   /^\[#[0-9a-f]+ .*\]$/i,
   /^\S*\s*\d{1,3}(\.\d+)?%\s+\d{1,2}:\d{2}:\d{2}/,
   /^Transferred:/,

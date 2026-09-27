@@ -39,6 +39,7 @@ BILI_PULL = os.path.join(HERE, "scripts", "bili_pull.py")
 PROCESS_MEDIA = os.path.join(HERE, "scripts", "process_media.py")
 UPLOAD_MEDIA = os.path.join(HERE, "scripts", "upload_media.py")
 TORRENT_DOWNLOAD = os.path.join(HERE, "scripts", "torrent_download.py")
+REMOTE_FETCH = os.path.join(HERE, "scripts", "remote_fetch.py")
 DRIVE_FILES = os.path.join(HERE, "scripts", "drive_files.mjs")
 DRIVE_DOWNLOAD = os.path.join(HERE, "scripts", "drive_download.mjs")
 JOBS_DIR = os.path.realpath(os.environ.get("BILI_JOBS_DIR", os.path.join(HERE, "jobs")))
@@ -49,6 +50,8 @@ TOKEN = os.environ.get("BILI_WEB_TOKEN") or ""
 HOST = os.environ.get("BILI_WEB_HOST", "127.0.0.1")  # loopback; tunnel in over SSH
 PORT = int(os.environ.get("BILI_WEB_PORT", "8787"))
 TRANSFER_ONLY = os.environ.get("BILI_TRANSFER_ONLY") == "1"
+RCLONE_REMOTE = os.environ.get("BILI_RCLONE_REMOTE", "").rstrip("/")
+VIDEO_EXTENSIONS = (".mkv", ".mp4", ".mov", ".webm", ".m4v", ".avi", ".ts")
 LOG_TAIL = 128 * 1024  # first view of a log
 LOG_CHUNK = 512 * 1024  # one incremental or "older lines" read
 LOG_FULL_LIMIT = 32 * 1024 * 1024  # log download
@@ -79,7 +82,145 @@ def enqueue_upload(paths, kind, keep_local=False, parent_job=None):
     return job
 
 
+HLS_OPTION_KEYS = {
+    "copy_video", "reencode", "ladder", "auto_hdr", "preserve_hdr",
+    "ladder_heights", "ladder_bitrates", "height", "video_bitrate",
+    "audio_channels", "audio_bitrate", "segment_seconds", "poster_seconds",
+    "gpu_tonemap", "copy_audio", "upload", "keep_local",
+}
+
+
+def enqueue_process(body, pipeline=None):
+    """Queue an HLS conversion of downloaded files; `pipeline` rides along in meta."""
+    files = [str(item) for item in (body.get("files") or []) if item]
+    if not files:
+        raise ValueError("no files selected")
+    for path in files:
+        resolved = os.path.realpath(path)
+        if not resolved.startswith(DOWNLOADS_DIR + os.sep) or not os.path.isfile(resolved):
+            raise ValueError(f"invalid downloaded file: {path}")
+    config = {key: body[key] for key in HLS_OPTION_KEYS if key in body}
+    config["files"] = [os.path.realpath(path) for path in files]
+    job = secrets.token_hex(8)
+    state_path = os.path.join(JOBS_DIR, job + ".json")
+    config_path = os.path.join(JOBS_DIR, job + ".config.json")
+    created = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump({"phase": "queued", "status": "queued", "files": config["files"]}, f, ensure_ascii=False, indent=2)
+    meta = {"job": job, "kind": "hls", "created": created, **config}
+    if pipeline:
+        meta["pipeline"] = pipeline
+    with open(os.path.join(JOBS_DIR, job + ".meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    queue.submit(job, "convert", [sys.executable, PROCESS_MEDIA, config_path, state_path])
+    return job
+
+
+def remote_relative(value):
+    """Normalise a path under BILI_RCLONE_REMOTE; refuse anything that climbs out."""
+    parts = [part for part in str(value or "").replace("\\", "/").split("/") if part not in ("", ".")]
+    if any(part == ".." for part in parts):
+        raise ValueError("invalid remote path")
+    return "/".join(parts)
+
+
+def remote_spec(relative):
+    return f"{RCLONE_REMOTE}/{relative}" if relative else RCLONE_REMOTE
+
+
+def enqueue_remote_download(relative, pipeline):
+    """One Drive-queue item: download (remote_fetch.py), then per `pipeline`
+    convert, upload and optionally delete the remote original."""
+    job = secrets.token_hex(8)
+    config_path = os.path.join(JOBS_DIR, job + ".config.json")
+    state_path = os.path.join(JOBS_DIR, job + ".json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump({"source": remote_spec(relative), "destination": os.path.join(DOWNLOADS_DIR, "remote", job)},
+                  f, ensure_ascii=False, indent=2)
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump({"kind": "remote_download", "phase": "queued", "status": "queued", "progress": 0}, f)
+    with open(os.path.join(JOBS_DIR, job + ".meta.json"), "w", encoding="utf-8") as f:
+        json.dump({"job": job, "kind": "remote_download", "source": relative, "url": relative,
+                   "name": os.path.basename(relative), "pipeline": pipeline,
+                   "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}, f, ensure_ascii=False, indent=2)
+    queue.submit(job, "download", [sys.executable, REMOTE_FETCH, config_path, state_path])
+    return job
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as source:
+            return json.load(source)
+    except (OSError, ValueError):
+        return {}
+
+
+def append_log(item, message):
+    with open(item["log"], "a", encoding="utf-8") as out:
+        out.write(f"==> {message}\n")
+
+
+def finish_remote_pipeline(upload_item, pipeline, bundles):
+    """After a Drive-queue item's HLS upload: remove the local original and,
+    when asked, delete the remote original — but only once each uploaded
+    bundle's playlist is visible on the remote."""
+    remote_root = os.path.join(DOWNLOADS_DIR, "remote") + os.sep
+    for path in pipeline.get("local_files") or []:
+        resolved = os.path.realpath(path)
+        if resolved.startswith(remote_root) and os.path.isfile(resolved):
+            os.remove(resolved)
+            append_log(upload_item, f"removed local original {resolved}")
+            try:
+                os.rmdir(os.path.dirname(resolved))
+            except OSError:
+                pass
+    source = pipeline.get("remote_source")
+    if not (pipeline.get("delete_remote_source") and source and RCLONE_REMOTE):
+        return
+    for bundle in bundles:
+        name = os.path.basename(str(bundle).rstrip("/"))
+        listing = subprocess.run(["rclone", "lsf", remote_spec(name), "--include", "*.m3u8"],
+                                 capture_output=True, text=True, timeout=120)
+        if listing.returncode or not listing.stdout.strip():
+            append_log(upload_item, f"kept remote original {source}: no uploaded playlist found in {name}")
+            return
+    result = subprocess.run(["rclone", "deletefile", remote_spec(source)], capture_output=True, text=True, timeout=120)
+    if result.returncode:
+        append_log(upload_item, f"could not delete remote original {source}: {result.stderr.strip()[-300:]}")
+    else:
+        append_log(upload_item, f"deleted remote original {source}")
+
+
 def on_job_complete(item, code):
+    if code:
+        return
+    meta = read_json(item["meta"])
+    pipeline = meta.get("pipeline") or {}
+    if item["lane"] == "download" and pipeline.get("hls") is not None:
+        # A Drive-queue download: convert it with the chosen profile; the
+        # convert branch below then queues its upload.
+        files = read_json(item["state"]).get("video_files") or []
+        try:
+            child = enqueue_process({**pipeline["hls"], "files": files, "upload": True},
+                                    pipeline={**pipeline, "remote_source": meta.get("source"), "local_files": files})
+            queue._state(item, convert_job=child)
+            append_log(item, f"queued HLS conversion job {child}")
+        except Exception as exc:
+            append_log(item, f"could not queue HLS conversion: {exc}")
+        return
+    if item["lane"] == "upload" and meta.get("upload_kind") == "hls" and meta.get("parent_job"):
+        parent = read_json(os.path.join(JOBS_DIR, meta["parent_job"] + ".meta.json")).get("pipeline")
+        if parent:
+            # rclone round trips; keep them off the scheduler thread.
+            threading.Thread(target=finish_remote_pipeline, args=(item, parent, meta.get("paths") or []),
+                             name="bili-remote-finish", daemon=True).start()
+        return
+    on_convert_complete(item, code)
+
+
+def on_convert_complete(item, code):
     if code or item["lane"] != "convert":
         return
     try:
@@ -498,6 +639,8 @@ class H(BaseHTTPRequestHandler):
         "/api/torrent": "handle_torrent",
         "/api/torrent/inspect": "handle_torrent_inspect",
         "/api/drive/download": "handle_drive_download",
+        "/api/remote/list": "handle_remote_list",
+        "/api/remote/queue": "handle_remote_queue",
         "/api/status": "handle_status",
         "/api/log": "handle_log",
         "/api/cancel": "handle_cancel",
@@ -749,35 +892,56 @@ class H(BaseHTTPRequestHandler):
     def handle_process(self, body):
         if TRANSFER_ONLY:
             return self._send(403, json.dumps({"error": "HLS conversion is disabled in transfer-only mode"}))
-        files = [str(item) for item in (body.get("files") or []) if item]
-        if not files:
-            return self._send(400, json.dumps({"error": "no files selected"}))
-        for path in files:
-            resolved = os.path.realpath(path)
-            if not resolved.startswith(DOWNLOADS_DIR + os.sep) or not os.path.isfile(resolved):
-                return self._send(400, json.dumps({"error": f"invalid downloaded file: {path}"}))
-        allowed = {
-            "files", "copy_video", "reencode", "ladder", "auto_hdr", "preserve_hdr",
-            "ladder_heights", "ladder_bitrates", "height", "video_bitrate",
-            "audio_channels", "audio_bitrate", "segment_seconds", "poster_seconds",
-            "gpu_tonemap", "copy_audio", "upload", "keep_local",
-        }
-        config = {key: body[key] for key in allowed if key in body}
-        config["files"] = [os.path.realpath(path) for path in files]
-        job = secrets.token_hex(8)
-        log_path = os.path.join(JOBS_DIR, job + ".log")
-        state_path = os.path.join(JOBS_DIR, job + ".json")
-        meta_path = os.path.join(JOBS_DIR, job + ".meta.json")
-        config_path = os.path.join(JOBS_DIR, job + ".config.json")
-        created = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump({"phase": "queued", "status": "queued", "files": config["files"]}, f, ensure_ascii=False, indent=2)
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump({"job": job, "kind": "hls", "created": created, **config}, f, ensure_ascii=False, indent=2)
-        queue.submit(job, "convert", [sys.executable, PROCESS_MEDIA, config_path, state_path])
+        try:
+            job = enqueue_process(body)
+        except ValueError as exc:
+            return self._send(400, json.dumps({"error": str(exc)}))
         self._send(200, json.dumps({"job": job}))
+
+    # ---- Drive queue (rclone remote) ----
+
+    def handle_remote_list(self, body):
+        if not RCLONE_REMOTE:
+            return self._send(400, json.dumps({"error": "ต้องตั้ง BILI_RCLONE_REMOTE (เช่น metube:tube) ก่อนจึงจะเปิดดูไฟล์บน Drive ได้"}))
+        try:
+            relative = remote_relative(body.get("path"))
+        except ValueError as exc:
+            return self._send(400, json.dumps({"error": str(exc)}))
+        result = subprocess.run(["rclone", "lsjson", remote_spec(relative), "--no-mimetype"],
+                                capture_output=True, text=True, timeout=120)
+        if result.returncode:
+            return self._send(502, json.dumps({"error": (result.stderr or "rclone lsjson failed").strip()[-500:]}))
+        items = []
+        for entry in json.loads(result.stdout or "[]"):
+            path = f"{relative}/{entry['Name']}" if relative else entry["Name"]
+            items.append({
+                "name": entry["Name"], "path": path, "dir": bool(entry.get("IsDir")),
+                "size": entry.get("Size", 0) if not entry.get("IsDir") else None,
+                "modified": entry.get("ModTime", ""),
+                "video": not entry.get("IsDir") and entry["Name"].lower().endswith(VIDEO_EXTENSIONS),
+            })
+        items.sort(key=lambda item: (not item["dir"], item["name"].lower()))
+        self._send(200, json.dumps({"remote": RCLONE_REMOTE, "path": relative, "items": items}))
+
+    def handle_remote_queue(self, body):
+        if not RCLONE_REMOTE:
+            return self._send(400, json.dumps({"error": "BILI_RCLONE_REMOTE is not configured"}))
+        try:
+            paths = [remote_relative(path) for path in (body.get("paths") or [])]
+        except ValueError as exc:
+            return self._send(400, json.dumps({"error": str(exc)}))
+        if not paths or any(not path.lower().endswith(VIDEO_EXTENSIONS) for path in paths):
+            return self._send(400, json.dumps({"error": "เลือกไฟล์วิดีโออย่างน้อยหนึ่งไฟล์"}))
+        hls = body.get("hls")
+        if hls is not None:
+            if TRANSFER_ONLY:
+                return self._send(403, json.dumps({"error": "HLS conversion is disabled in transfer-only mode"}))
+            if not isinstance(hls, dict):
+                return self._send(400, json.dumps({"error": "invalid HLS profile"}))
+            hls = {key: hls[key] for key in HLS_OPTION_KEYS if key in hls}
+        delete_remote = bool(body.get("delete_remote_source")) and hls is not None
+        jobs_created = [enqueue_remote_download(path, {"hls": hls, "delete_remote_source": delete_remote}) for path in paths]
+        self._send(200, json.dumps({"jobs": jobs_created}))
 
     def handle_upload(self, body):
         # Original-file transfers use the same independent upload lane as HLS.
@@ -1127,7 +1291,17 @@ class H(BaseHTTPRequestHandler):
                 return self.handle_torrent(retry_body, retry_destination=destination)
             return self._send(404, json.dumps({"error": "ไม่พบไฟล์ .torrent เดิมสำหรับ retry"}))
         if meta.get("kind") == "hls":
-            return self.handle_process(meta)
+            if TRANSFER_ONLY:
+                return self._send(403, json.dumps({"error": "HLS conversion is disabled in transfer-only mode"}))
+            try:
+                new_job = enqueue_process(meta, pipeline=meta.get("pipeline"))
+            except ValueError as exc:
+                return self._send(400, json.dumps({"error": str(exc)}))
+            return self._send(200, json.dumps({"job": new_job}))
+        if meta.get("kind") == "remote_download":
+            if not RCLONE_REMOTE:
+                return self._send(400, json.dumps({"error": "BILI_RCLONE_REMOTE is not configured"}))
+            return self._send(200, json.dumps({"job": enqueue_remote_download(meta.get("source") or "", meta.get("pipeline") or {})}))
         if meta.get("kind") == "drive_download":
             return self.handle_drive_download({"source": meta.get("source"), "resource_key": meta.get("resource_key")})
         if meta.get("kind") == "upload":
@@ -1146,7 +1320,7 @@ class H(BaseHTTPRequestHandler):
         for root, _dirs, names in os.walk(DOWNLOADS_DIR):
             for n in names:
                 p = os.path.join(root, n)
-                if n.endswith(".aria2") or os.path.exists(p + ".aria2"):
+                if n.endswith((".aria2", ".partial")) or os.path.exists(p + ".aria2"):
                     continue
                 if root.startswith(os.path.join(DOWNLOADS_DIR, "drive") + os.sep) and n.endswith(".part"):
                     continue

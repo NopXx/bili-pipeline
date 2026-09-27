@@ -71,7 +71,7 @@ async function downloadWithRclone(remote, fileId, resourceKey, destination, stat
       const match = line.match(/(?:Transferred:|,\s*)(\d{1,3})%/)
       if (!match) continue
       // `208.382 MiB / 8.501 GiB, 2%, 32.095 MiB/s, ETA 4m24s`
-      const stats = line.match(/([\d.]+\s*[kMGTPE]?i?B)\s*\/\s*([\d.]+\s*[kMGTPE]?i?B),\s*\d{1,3}%,\s*([\d.]+\s*[kMGTPE]?i?B\/s)(?:,\s*ETA\s+([^\s,]+))?/)
+      const stats = line.match(/([\d.]+\s*[kKMGTPE]?i?B)\s*\/\s*([\d.]+\s*[kKMGTPE]?i?B),\s*\d{1,3}%,\s*([\d.]+\s*[kKMGTPE]?i?B\/s)(?:,\s*ETA\s+([^\s,]+))?/)
       state(statePath, {
         phase: 'drive', status: 'downloading', progress: Math.min(100, Number(match[1])),
         ...(stats ? { done: stats[1], total: stats[2], speed: stats[3], eta: stats[4] && stats[4] !== '-' ? stats[4] : '' } : {}),

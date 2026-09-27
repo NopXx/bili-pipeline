@@ -108,10 +108,10 @@ def run_with_progress(command, env, total, label, state_path):
         rclone_progress = None
         if label == "UPLOAD":
             rclone_progress = re.search(
-                r"([\d.]+\s+[kMGTPE]?i?B)\s*/\s*"
-                r"([\d.]+\s+[kMGTPE]?i?B),\s*"
+                r"([\d.]+\s+[kKMGTPE]?i?B)\s*/\s*"
+                r"([\d.]+\s+[kKMGTPE]?i?B),\s*"
                 r"(\d{1,3})%,\s*"
-                r"([\d.]+\s+[kMGTPE]?i?B/s)",
+                r"([\d.]+\s+[kKMGTPE]?i?B/s)",
                 text,
             )
         if rclone_progress:
@@ -197,6 +197,61 @@ def run_with_progress(command, env, total, label, state_path):
         raise subprocess.CalledProcessError(code, command)
 
 
+def ladder_bitrates(value, keep=None):
+    """'1080=8M,720:4M' -> '1080:8M,720:4M' (hls-prep's HEIGHT:RATE), optionally filtered."""
+    pairs = []
+    for pair in str(value or "").split(","):
+        height, _, rate = pair.replace("=", ":").partition(":")
+        if height.strip() and rate.strip() and (keep is None or height.strip() in keep):
+            pairs.append(f"{height.strip()}:{rate.strip()}")
+    return ",".join(pairs)
+
+
+def engine_env(config):
+    """Translate a web HLS profile into prep-hls.sh (hls-prep) environment knobs.
+
+    hls-prep has no single-rendition height or HDR mode switches; those are
+    expressed as ladders: an encode at a chosen height is a one-rung ladder,
+    "HDR Auto" keeps the source as the 'raw' rung beside 1080/720 SDR rungs,
+    and "Preserve HDR" is a source-resolution HEVC Main 10 'hdr' rung.
+    Encoded modes force a re-encode, because hls-prep otherwise stream-copies
+    an H.264 source (including a ladder's top rung).
+    """
+    env = {}
+
+    def put(name, value):
+        if value not in (None, "", False, "auto"):
+            env[name] = "1" if value is True else str(value)
+
+    height = int(config.get("height") or 0)
+    rate = config.get("video_bitrate")
+    if config.get("auto_hdr"):
+        env.update(PREP_LADDER="1", PREP_LADDER_HEIGHTS="raw,1080,720", PREP_FORCE_VIDEO_ENCODE="1", PREP_GPU_TONEMAP="1")
+        put("PREP_LADDER_BITRATES", ladder_bitrates(config.get("ladder_bitrates"), {"1080", "720"}))
+    elif config.get("preserve_hdr"):
+        env.update(PREP_LADDER="1", PREP_LADDER_HEIGHTS="hdr")
+        put("PREP_HDR_BITRATE", rate)
+    elif config.get("ladder"):
+        env.update(PREP_LADDER="1", PREP_FORCE_VIDEO_ENCODE="1")
+        put("PREP_LADDER_HEIGHTS", config.get("ladder_heights"))
+        put("PREP_LADDER_BITRATES", ladder_bitrates(config.get("ladder_bitrates")))
+    elif config.get("reencode"):
+        env["PREP_FORCE_VIDEO_ENCODE"] = "1"
+        if height:
+            env.update(PREP_LADDER="1", PREP_LADDER_HEIGHTS=str(height))
+            put("PREP_LADDER_BITRATES", f"{height}:{rate}" if rate else "")
+        else:
+            put("PREP_VIDEO_BITRATE", rate)
+    elif config.get("copy_video"):
+        env["PREP_COPY_VIDEO"] = "1"
+    put("PREP_GPU_TONEMAP", config.get("gpu_tonemap"))
+    for key, name in (("copy_audio", "PREP_COPY_AUDIO"), ("audio_bitrate", "PREP_AUDIO_BITRATE"),
+                      ("audio_channels", "PREP_AUDIO_CHANNELS"), ("segment_seconds", "PREP_SEGMENT_SECONDS"),
+                      ("poster_seconds", "PREP_POSTER_SECONDS")):
+        put(name, config.get(key))
+    return env
+
+
 def main():
     if len(sys.argv) != 3:
         raise SystemExit("usage: process_media.py config.json state.json")
@@ -209,20 +264,7 @@ def main():
         if DOWNLOADS not in path.parents or not path.is_file():
             raise RuntimeError(f"invalid downloaded file: {path}")
 
-    env = dict(os.environ)
-    mappings = {
-        "copy_video": "PREP_COPY_VIDEO", "reencode": "PREP_REENCODE", "ladder": "PREP_LADDER",
-        "auto_hdr": "PREP_AUTO_HDR", "preserve_hdr": "PREP_PRESERVE_HDR",
-        "gpu_tonemap": "PREP_GPU_TONEMAP", "copy_audio": "PREP_COPY_AUDIO",
-        "ladder_heights": "PREP_LADDER_HEIGHTS", "ladder_bitrates": "PREP_LADDER_BITRATES",
-        "height": "PREP_HEIGHT", "video_bitrate": "PREP_VIDEO_BITRATE",
-        "audio_bitrate": "PREP_AUDIO_BITRATE", "audio_channels": "PREP_AUDIO_CHANNELS",
-        "segment_seconds": "PREP_SEGMENT_SECONDS", "poster_seconds": "PREP_POSTER_SECONDS",
-    }
-    for key, target in mappings.items():
-        value = config.get(key)
-        if value not in (None, "", False, "auto"):
-            env[target] = "1" if value is True else str(value)
+    env = {**os.environ, **engine_env(config)}
 
     # Upload the original files straight to Drive, no HLS conversion. Each file
     # lands in its own sub-folder (drive_upload.mjs), and the per-file "uploaded"
