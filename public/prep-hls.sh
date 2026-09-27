@@ -51,7 +51,10 @@
 #   PREP_NVENC_LADDER_PRESET NVENC preset for ladder rungs; default p3
 #   PREP_NVENC_TUNE        NVENC tune; default hq
 #   PREP_GPU_TONEMAP=0/1   use hardware HDR->SDR tonemapping when available.
-#                          Apple VideoToolbox defaults to on; NVIDIA defaults off
+#                          Apple VideoToolbox defaults to on; NVIDIA defaults off.
+#                          NVIDIA uses libplacebo (Vulkan) when ffmpeg has it,
+#                          else OpenCL tonemap_opencl; 'opencl' forces OpenCL
+#   PREP_OPENCL_DEVICE     OpenCL platform.device for tonemap_opencl; default 0.0
 #   PREP_COPY_AUDIO=1      also carry the original audio untouched (Apple only)
 #   PREP_AUDIO_POLICY     'transcode' (default) keeps the existing stereo/5.1
 #                          AAC behavior. 'browser-copy' does no audio encoding:
@@ -412,15 +415,59 @@ if [ -n "${PREP_LADDER:-}" ] && [ "$venc" = "h264_nvenc" ] && [ "$is_hdr" = "0" 
   gpu_ladder=1
 fi
 
+# OpenCL tonemapping (tonemap_opencl) is the NVIDIA fallback when ffmpeg has no
+# libplacebo — Kaggle's and Colab's stock builds, for instance. Like the
+# encoders, prove it with a real frame: a listed filter means nothing without a
+# working OpenCL driver. The test frame is tagged BT.2020/PQ because
+# tonemap_opencl refuses SDR input.
+tonemap_backend=''
+opencl_device=${PREP_OPENCL_DEVICE:-0.0}
+test_opencl_tonemap() {
+  ffmpeg -nostdin -hide_banner -v error -init_hw_device "opencl=ocl:$opencl_device" -filter_hw_device ocl \
+    -f lavfi -i 'testsrc2=size=320x180:rate=24' -t 0.25 \
+    -vf 'setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=p010le,hwupload,tonemap_opencl=tonemap=hable:desat=0:format=nv12:primaries=bt709:transfer=bt709:matrix=bt709:range=tv,hwdownload,format=nv12' \
+    -f null - </dev/null >/dev/null 2>&1
+}
+if [ "$is_hdr" = "1" ] && [ "$apple_vt_hdr" = "0" ]; then
+  case "${PREP_GPU_TONEMAP:-0}" in
+    1)
+      if [ "$venc" = "h264_nvenc" ] && echo "$ff_filters" | grep -q libplacebo; then
+        tonemap_backend=libplacebo
+      elif [ "$venc" = "h264_nvenc" ] && echo "$ff_filters" | grep -q tonemap_opencl && test_opencl_tonemap; then
+        tonemap_backend=opencl
+      fi
+      ;;
+    opencl)
+      if echo "$ff_filters" | grep -q tonemap_opencl && test_opencl_tonemap; then
+        tonemap_backend=opencl
+      else
+        echo "  PREP_GPU_TONEMAP=opencl, but OpenCL tonemapping failed its preflight — using the CPU" >&2
+      fi
+      ;;
+  esac
+fi
+# NVDEC for the OpenCL path: T4-class GPUs decode HEVC/H.264 but not AV1, so
+# only those codecs, and only after a real one-frame decode.
+opencl_nvdec=0
+if [ "$tonemap_backend" = "opencl" ] && { [ "$video_codec" = "hevc" ] || [ "$video_codec" = "h264" ]; } &&
+  ffmpeg -nostdin -hide_banner -v error -hwaccel cuda -i "$input" -frames:v 1 -f null - </dev/null >/dev/null 2>&1; then
+  opencl_nvdec=1
+fi
+opencl_tonemap_filter="format=p010le,hwupload,tonemap_opencl=tonemap=hable:desat=0:format=nv12:primaries=bt709:transfer=bt709:matrix=bt709:range=tv,hwdownload,format=nv12,format=yuv420p"
+
 # An HDR ladder is the slow one: tonemapping is the cost, and the CPU chain runs
 # it on the full frame once per rung. With libplacebo we tonemap once on the GPU
 # and split that single SDR result to the rungs (the filter_complex is built in
 # the ladder section) — roughly 3x faster. A copy-top-rung ladder keeps the
 # per-rung path, so this wants every rung encoded.
 gpu_hdr_ladder=0
-if [ -n "${PREP_LADDER:-}" ] && [ "$is_hdr" = "1" ] && [ "${PREP_GPU_TONEMAP:-0}" = "1" ] &&
-  [ "$venc" = "h264_nvenc" ] && [ "$copy_video" != "1" ] && echo "$ff_filters" | grep -q libplacebo &&
-  [ "$scale_cuda_format" = "1" ]; then
+if [ -n "${PREP_LADDER:-}" ] && [ "$is_hdr" = "1" ] && [ "$tonemap_backend" = "libplacebo" ] &&
+  [ "$copy_video" != "1" ] && [ "$scale_cuda_format" = "1" ]; then
+  gpu_hdr_ladder=1
+fi
+# The OpenCL twin: scale down first (on the GPU with NVDEC + scale_cuda when
+# possible, otherwise on the CPU), tonemap once, split to the rungs.
+if [ -n "${PREP_LADDER:-}" ] && [ "$is_hdr" = "1" ] && [ "$tonemap_backend" = "opencl" ] && [ "$copy_video" != "1" ]; then
   gpu_hdr_ladder=1
 fi
 
@@ -575,22 +622,35 @@ if [ "$gpu_hdr_passthrough" = "1" ]; then
 elif [ "$apple_vt_hdr" = "1" ]; then
   input_args=(-hwaccel videotoolbox -hwaccel_output_format videotoolbox_vld)
   echo "  tonemapping HDR ($video_transfer, $video_pixfmt) to SDR BT.709 with Apple VideoToolbox GPU"
-elif [ "$is_hdr" = "1" ] && [ "${PREP_GPU_TONEMAP:-0}" = "1" ] && [ "$gpu_hdr_ladder" = "0" ] &&
-  echo "$ff_filters" | grep -q libplacebo; then
+elif [ "$is_hdr" = "1" ] && [ "$tonemap_backend" = "libplacebo" ] && [ "$gpu_hdr_ladder" = "0" ]; then
   # Single-stream GPU tonemap (and the lower rungs of a copy-top-rung ladder).
   # NVDEC hands off CUDA frames; libplacebo wants Vulkan, and there is no direct
   # interop, so the one hwdownload in the middle is the price.
   input_args=(-init_hw_device vulkan=vk -filter_hw_device vk -hwaccel cuda -hwaccel_output_format cuda)
   base_vf='hwdownload,format=p010le,libplacebo=tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=bt709:format=yuv420p,hwdownload,format=yuv420p'
   echo "  tonemapping HDR ($video_transfer, $video_pixfmt) on the GPU with libplacebo (bt.2390)"
+elif [ "$is_hdr" = "1" ] && [ "$tonemap_backend" = "opencl" ] && [ "$gpu_hdr_ladder" = "0" ]; then
+  # Single stream: NVDEC (frames back in system memory) -> OpenCL tonemap.
+  input_args=(-init_hw_device "opencl=ocl:$opencl_device" -filter_hw_device ocl)
+  [ "$opencl_nvdec" = "1" ] && input_args+=(-hwaccel cuda)
+  base_vf=$opencl_tonemap_filter
+  echo "  tonemapping HDR ($video_transfer, $video_pixfmt) on the GPU with OpenCL tonemap_opencl$([ "$opencl_nvdec" = "1" ] && echo ', NVDEC decode')"
+elif [ "$gpu_hdr_ladder" = "1" ] && [ "$tonemap_backend" = "opencl" ]; then
+  input_args=(-init_hw_device "opencl=ocl:$opencl_device" -filter_hw_device ocl)
+  if [ "$opencl_nvdec" = "1" ] && [ "$scale_cuda_format" = "1" ]; then
+    input_args+=(-hwaccel cuda -hwaccel_output_format cuda)
+  elif [ "$opencl_nvdec" = "1" ]; then
+    input_args+=(-hwaccel cuda)
+  fi
+  echo "  ladder: tonemapping HDR ($video_transfer, $video_pixfmt) once with OpenCL tonemap_opencl, then splitting to the rungs"
 elif [ "$gpu_hdr_ladder" = "1" ]; then
   # The tonemap+split lives in the filter_complex below; here we just name the
   # Vulkan/CUDA devices it needs.
   input_args=(-init_hw_device vulkan=vk -filter_hw_device vk -hwaccel cuda -hwaccel_output_format cuda)
   echo "  ladder: tonemapping HDR ($video_transfer, $video_pixfmt) once on the GPU, then splitting to the rungs"
 elif [ "$is_hdr" = "1" ]; then
-  if [ "${PREP_GPU_TONEMAP:-0}" = "1" ] && ! echo "$ff_filters" | grep -q libplacebo; then
-    echo "  PREP_GPU_TONEMAP asked for, but this ffmpeg has no libplacebo — using the CPU" >&2
+  if [ "${PREP_GPU_TONEMAP:-0}" = "1" ] && [ -z "$tonemap_backend" ]; then
+    echo "  PREP_GPU_TONEMAP asked for, but neither libplacebo nor OpenCL tonemapping works here — using the CPU" >&2
   fi
   # Linearise PQ, tonemap in float, land back on BT.709.
   base_vf='zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p'
@@ -794,7 +854,17 @@ if [ -n "${PREP_LADDER:-}" ]; then
     max_scale_w=$rung_scale_w; max_scale_h=$rung_scale_h
     labels=""
     for ((k = 0; k < ${#heights[@]}; k++)); do labels+="[s$k]"; done
-    tonemap="[0:v]scale_cuda=${max_scale_w}:${max_scale_h}:format=p010le,hwdownload,format=p010le,libplacebo=tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=bt709:format=yuv420p,hwdownload,format=yuv420p"
+    if [ "$tonemap_backend" = "opencl" ]; then
+      if [ "$opencl_nvdec" = "1" ] && [ "$scale_cuda_format" = "1" ]; then
+        tonemap="[0:v]scale_cuda=${max_scale_w}:${max_scale_h}:format=p010le,hwdownload,$opencl_tonemap_filter"
+      elif [ "$rung_scale_mode" = "none" ]; then
+        tonemap="[0:v]$opencl_tonemap_filter"
+      else
+        tonemap="[0:v]scale=${max_scale_w}:${max_scale_h},$opencl_tonemap_filter"
+      fi
+    else
+      tonemap="[0:v]scale_cuda=${max_scale_w}:${max_scale_h}:format=p010le,hwdownload,format=p010le,libplacebo=tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=bt709:format=yuv420p,hwdownload,format=yuv420p"
+    fi
     scale_parts=()
     for k in "${!heights[@]}"; do
       h=${heights[$k]}
@@ -807,11 +877,15 @@ if [ -n "${PREP_LADDER:-}" ]; then
       fi
       video_maps+=(-map "[v$k]")
       br=$(rung_bitrate "$h")
-      video_args+=(-c:v:"$nvid" "$venc" -b:v:"$nvid" "$br" -preset:v:"$nvid" p3 \
+      case "$venc" in
+        h264_nvenc) video_args+=(-preset:v:"$nvid" "${PREP_NVENC_LADDER_PRESET:-p3}") ;;
+        libx264) video_args+=(-preset:v:"$nvid" medium) ;;
+      esac
+      video_args+=(-c:v:"$nvid" "$venc" -b:v:"$nvid" "$br" \
         -flags:v:"$nvid" +cgop \
         -force_key_frames:v:"$nvid" "expr:gte(t,n_forced*$segment_seconds)" \
         -color_primaries:v:"$nvid" bt709 -color_trc:v:"$nvid" bt709 -colorspace:v:"$nvid" bt709)
-      echo "  rung ${h}p: encoding to H.264 with $venc ($br), GPU-tonemapped"
+      echo "  rung ${h}p: encoding to H.264 with $venc ($br), tonemapped once with $tonemap_backend"
       nvid=$((nvid + 1))
     done
     scale_join=""

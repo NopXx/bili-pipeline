@@ -11,7 +11,7 @@ createApp({
     files:[],selectedFiles:[],jobs:[],probe:[],probeBusy:false,
     remote:{root:'',path:'',items:[],selected:[],sizes:{},busy:false,error:'',loaded:false,deleteSource:false},
     activeJob:localStorage.getItem('bwj')||'',running:false,log:'',jobState:{},pollTimer:null,queueTimer:null,
-    config:{mode:'copy',height:1080,videoBitrate:'8M',gpuTonemap:false,
+    config:{mode:'copy',height:1080,videoBitrate:'8M',gpuTonemap:true,
       rungs:[{h:'raw',on:false,rate:''},{h:2160,on:true,rate:'16M'},{h:1440,on:true,rate:'10M'},{h:1080,on:true,rate:'8M'},{h:720,on:false,rate:'4M'},{h:480,on:false,rate:'2M'}],
       audio:['2','raw'],audioBitrate:'auto',segment:6,poster:5,upload:true,keepLocal:false}
   }},

@@ -1,13 +1,14 @@
 # TODO
 
-- [ ] **ให้งาน HDR ใช้ Vulkan บน GPU ตัวเดียวกับที่งานได้รับ**
-  งานแปลงสองงานพร้อมกันจะแยก GPU ด้วย `CUDA_VISIBLE_DEVICES` (`BILI_CONVERT_GPUS`) แต่เวลาเปิด GPU tonemap (`PREP_GPU_TONEMAP=1`)
-  `public/prep-hls.sh` จะเรียก `-init_hw_device vulkan=vk` โดยไม่ระบุอุปกรณ์ Vulkan ไม่สน `CUDA_VISIBLE_DEVICES`
-  งาน HDR สองงานจึงอาจไปทำ libplacebo tonemap บน GPU 0 ทั้งคู่
-  - ส่ง index หรือชื่อ GPU ที่งานได้รับจาก `process_media.py` ให้ `prep-hls.sh` แล้วใช้ `vulkan=vk:<index>` ต้องเช็กว่าลำดับอุปกรณ์ Vulkan ตรงกับลำดับ CUDA
-  - ทำทั้งเส้นทาง single-stream และ `gpu_hdr_ladder`
-  - ยืนยันบน Kaggle (T4 x2) ด้วย `nvidia-smi` ระหว่างแปลง HDR สองงานพร้อมกัน
+- [x] **HDR ใช้ GPU ตัวเดียวกับที่งานได้รับ** — ทดสอบบน Kaggle T4 x2 แล้ว (2026-09-27)
+  Kaggle ไม่มี libplacebo/Vulkan จึงใช้ OpenCL `tonemap_opencl` แทน สองงานพร้อมกัน (`CUDA_VISIBLE_DEVICES=0` และ `1`)
+  ใช้ GPU คนละตัวจริง ทั้ง NVDEC, OpenCL และ NVENC ต่างตัวยุ่งพอ ๆ กัน และจบพร้อมกัน
+  ยังต้องระวัง: บนเครื่องที่มี libplacebo (Vulkan) Vulkan ไม่สน `CUDA_VISIBLE_DEVICES`
 
-- [ ] **ทดสอบคิวแปลงสอง GPU กับงานจริงบน Kaggle** (commit `f1f93ce`)
-  ส่งงานแปลง 3 งาน แล้วเช็กว่า 2 งานแรก `running` บน GPU 0/1 และงานที่ 3 รอคิว พร้อมดู `nvidia-smi` และ log ของ FFmpeg
+- [ ] **ความสว่างของ HDR→SDR แบบ OpenCL ต่างจากแบบ CPU**
+  คลิปทดสอบ (testsrc ติดแท็ก PQ ไม่มี mastering metadata) ออกมามืดกว่า: YAVG ~82 เทียบกับ ~119 ของ CPU chain
+  ทั้งที่ใช้ hable และ desat=0 เหมือนกัน ต้องเทียบกับไฟล์ HDR จริงด้วยตา ถ้ามืดไป ปรับ `peak`/`param` ของ `tonemap_opencl`
+
+- [ ] **ทดสอบคิวแปลงสอง GPU ผ่านเว็บจริงบน Kaggle**
+  ส่งงานแปลง 3 งานจากหน้าเว็บ แล้วเช็กว่า 2 งานแรก `running` บน GPU 0/1 และงานที่ 3 รอคิว (ระดับ engine ผ่านแล้ว)
   อย่ารีสตาร์ตเว็บบน Kaggle ระหว่างมีงานรันอยู่
