@@ -210,7 +210,8 @@
                 <span>เลือก {{remote.selected.length}} ไฟล์ · {{size(remoteSelectedSize)}}</span>
                 <button class="ghost small" @click="remote.selected = []">ล้าง</button>
               </div>
-              <div class="note-muted" v-if="remote.probing"><span class="spinner dim"></span> กำลังอ่านข้อมูลไฟล์บน Drive (ไม่ต้องดาวน์โหลด)…</div>
+              <div class="note-muted" v-if="remote.probing"><span class="spinner dim"></span> กำลังอ่านข้อมูลไฟล์บน Drive (ไม่ต้องดาวน์โหลด) · เหลือ {{remoteProbePending}} ไฟล์…</div>
+              <p class="hint" v-if="remote.selected.length > remoteProbeTargets.length">แสดงข้อมูลตัวอย่าง {{remoteProbeTargets.length}} ไฟล์แรกจาก {{remote.selected.length}} · bitrate อัตโนมัติยังคำนวณแยกทุกไฟล์ตอนแปลง · กดเพิ่มเข้าคิวได้เลยไม่ต้องรอ</p>
               <div class="note-bad" v-for="m in remoteProbeErrors" :key="m.path">อ่านข้อมูล {{m.name}} ไม่ได้: {{m.error}}</div>
               <div class="sources" v-if="remoteProbe.length">
                 <article class="source compact" v-for="m in remoteProbe" :key="m.path">

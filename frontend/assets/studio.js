@@ -170,6 +170,7 @@ const HlsConfig = {
 // --- page ------------------------------------------------------------------------
 const BILI_DEFAULTS = { quality: 'auto', codec: 'AVC/H.264', audio_quality: 'auto', container: 'mp4', subtitle: false, redownload: false }
 const VIDEO = /\.(mp4|mkv|mov|webm|m4v|avi|ts)$/i
+const REMOTE_PROBE_SAMPLE = 3
 
 createApp({
   data() { return {
@@ -232,8 +233,13 @@ createApp({
       const parts = this.remote.path ? this.remote.path.split('/') : []
       return [{ name: this.remote.root || 'Drive', path: '' }, ...parts.map((name, i) => ({ name, path: parts.slice(0, i + 1).join('/') }))]
     },
-    remoteProbe() { return this.remote.selected.map(p => this.remote.probes[p]).filter(m => m && !m.error) },
-    remoteProbeErrors() { return this.remote.selected.map(p => this.remote.probes[p]).filter(m => m?.error) },
+    // Probing reads each file over the network, so a big selection (a whole
+    // season) shows a few samples; auto bitrate still measures every file
+    // when it converts.
+    remoteProbeTargets() { return this.remote.selected.slice(0, REMOTE_PROBE_SAMPLE) },
+    remoteProbe() { return this.remoteProbeTargets.map(p => this.remote.probes[p]).filter(m => m && !m.error) },
+    remoteProbeErrors() { return this.remoteProbeTargets.map(p => this.remote.probes[p]).filter(m => m?.error) },
+    remoteProbePending() { return this.remoteProbeTargets.filter(p => !this.remote.probes[p]).length },
     // Folders first, then files; both in the chosen order (names compare numerically: E2 < E10).
     // Drive folders have no size and are never videos, so those orders keep folders A–Z.
     remoteItems() {
@@ -434,13 +440,14 @@ createApp({
     },
     // Read codec/bitrate/HDR/audio of selected Drive files without downloading them.
     async probeRemote() {
-      const missing = this.remote.selected.filter(p => !this.remote.probes[p]).slice(0, 10)
+      // One file per request, so the count below moves and a changed selection wins quickly.
+      const missing = this.remoteProbeTargets.filter(p => !this.remote.probes[p]).slice(0, 1)
       if (!missing.length || this.remote.probing) return
       this.remote.probing = true
       try {
         for (const m of await this.api('/api/remote/probe', { paths: missing })) this.remote.probes[m.path] = m
-      } catch (error) { this.fail(error) } finally { this.remote.probing = false }
-      if (this.remote.selected.some(p => !this.remote.probes[p])) this.probeRemote()
+      } catch (error) { this.fail(error); return } finally { this.remote.probing = false }
+      this.probeRemote()
     },
     // Select every video below this folder (a series stored one folder per
     // episode), skipping the ones whose HLS is already on Drive.
