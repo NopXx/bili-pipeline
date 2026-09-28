@@ -1044,11 +1044,19 @@ class H(BaseHTTPRequestHandler):
     def handle_process(self, body):
         if TRANSFER_ONLY:
             return self._send(403, json.dumps({"error": "HLS conversion is disabled in transfer-only mode"}))
+        # One job per file: the queue gives each convert job its own GPU, so
+        # a season converts on every GPU at once, and each episode uploads as
+        # soon as it is done. Validate them all before queueing any.
+        files = [str(item) for item in (body.get("files") or []) if item]
+        for path in files:
+            resolved = os.path.realpath(path)
+            if not resolved.startswith(DOWNLOADS_DIR + os.sep) or not os.path.isfile(resolved):
+                return self._send(400, json.dumps({"error": f"invalid downloaded file: {path}"}))
         try:
-            job = enqueue_process(body)
+            created = [enqueue_process({**body, "files": [path]}) for path in files] if files else [enqueue_process(body)]
         except ValueError as exc:
             return self._send(400, json.dumps({"error": str(exc)}))
-        self._send(200, json.dumps({"job": job}))
+        self._send(200, json.dumps({"job": created[0], "jobs": created}))
 
     # ---- Drive queue (rclone remote) ----
 

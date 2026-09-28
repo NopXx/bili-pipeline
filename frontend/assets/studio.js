@@ -531,7 +531,7 @@ createApp({
       try {
         const r = await this.api('/api/process', { files: this.convertFiles, ...hlsProfile(c) })
         this.convertFiles = []; this.probe = []
-        this.queued(r.job, 'เริ่มแปลง HLS แล้ว')
+        this.queued(r.job, r.jobs?.length > 1 ? `เพิ่ม ${r.jobs.length} ไฟล์เข้าคิวแปลง (แยกงานละไฟล์ ใช้ทุก GPU)` : 'เริ่มแปลง HLS แล้ว')
       } catch (error) { this.fail(error) }
     },
 

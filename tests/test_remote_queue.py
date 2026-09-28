@@ -210,6 +210,30 @@ class RemoteQueueTests(unittest.TestCase):
             "Show/S1 EP-01/S1 EP-01.mkv": True, "Show/S1 EP-02/S1 EP-02.mkv": False,
             "Show/S2/E01.mkv": True, "Show/S2/E02.mkv": False})
 
+    def test_converting_many_files_queues_one_job_per_file(self):
+        web = self.web
+        videos = [Path(os.environ["BILI_DOWNLOADS_DIR"], "Show", f"E0{n}.mkv") for n in (1, 2, 3)]
+        videos[0].parent.mkdir(parents=True)
+        for video in videos:
+            video.write_bytes(b"video")
+        sent = []
+        handler = web.H.__new__(web.H)
+        handler._send = lambda code, body: sent.append((code, json.loads(body)))
+        with patch.object(web.queue, "submit") as submit:
+            handler.handle_process({"files": [str(v) for v in videos], "ladder": True, "upload": True})
+        code, body = sent[0]
+        self.assertEqual(code, 200, body)
+        self.assertEqual((len(body["jobs"]), body["job"], submit.call_count), (3, body["jobs"][0], 3))
+        for job, video in zip(body["jobs"], videos):
+            config = json.loads(Path(web.JOBS_DIR, job + ".config.json").read_text())
+            self.assertEqual((config["files"], config["ladder"]), ([os.path.realpath(video)], True))
+
+        # One bad path rejects the whole request before anything is queued.
+        sent.clear()
+        with patch.object(web.queue, "submit") as submit:
+            handler.handle_process({"files": [str(videos[0]), "/etc/passwd"]})
+        self.assertEqual((sent[0][0], submit.call_count), (400, 0))
+
     def test_pages_pin_assets_to_their_content(self):
         web = self.web
         page = '<script src="/assets/studio.js"></script><link href="/assets/missing.css">'
