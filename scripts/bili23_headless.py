@@ -98,6 +98,11 @@ def seed_config():
         target = Path(downloads) / "bilibili"
         target.mkdir(parents=True, exist_ok=True)
         config.setdefault("Download", {})["download_path"] = str(target)
+    # Hi-Res Bilibili sources (e.g. Blu-ray concerts) carry FLAC audio, which
+    # MP4 rejects — ffmpeg aborts the merge with "flac in MP4 is experimental"
+    # after the whole file has already downloaded. MKV carries FLAC (and HEVC /
+    # Dolby Vision) natively, so default the merge container to it.
+    config.setdefault("Download", {})["video_container"] = "mkv"
     # A config without a version is treated as old and migrated, which resets
     # naming rules and queues a notice dialog. Stamp the current version.
     match = re.search(r"app_config_version\s*=\s*(\d+)", (SOURCE / "src/util/common/config.py").read_text(encoding="utf-8"))
