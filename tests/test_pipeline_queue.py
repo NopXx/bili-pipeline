@@ -79,5 +79,29 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(transfer.call_args.args[0][0:3], ["rclone", "copy", str(bundle)])
 
 
+class BashResolutionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("bash_worker", SCRIPTS / "process_media.py")
+        cls.worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.worker)
+
+    def test_windows_paths_become_posix(self):
+        self.assertEqual(self.worker.to_bash_path(r"D:\movie\downloads\f.mkv"), "/d/movie/downloads/f.mkv")
+        self.assertEqual(self.worker.to_bash_path("/opt/bili-hls/x"), "/opt/bili-hls/x")
+
+    def test_bash_override_and_default(self):
+        with patch.dict(os.environ, {"BILI_BASH": r"C:\tools\bash.exe"}):
+            self.assertEqual(self.worker.find_bash(), r"C:\tools\bash.exe")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BILI_BASH", None)
+            found = self.worker.find_bash()
+            if os.name == "nt":
+                self.assertTrue(found.lower().endswith("bash.exe"))
+                self.assertNotIn("system32", found.lower())
+            else:
+                self.assertEqual(found, "bash")
+
+
 if __name__ == "__main__":
     unittest.main()

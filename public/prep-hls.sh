@@ -433,10 +433,22 @@ test_opencl_tonemap() {
     -vf 'setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=p010le,hwupload,tonemap_opencl=tonemap=hable:desat=0:format=nv12:primaries=bt709:transfer=bt709:matrix=bt709:range=tv,hwdownload,format=nv12' \
     -f null - </dev/null >/dev/null 2>&1
 }
+# libplacebo runs on Vulkan, which ignores CUDA_VISIBLE_DEVICES: on a
+# multi-GPU host it may pick a different GPU than the NVENC worker. Like the
+# encoders above, prove it with a real frame before committing a conversion
+# to it — a Vulkan device that fails to initialise must fall back to OpenCL
+# or the CPU, not fail the whole job. The chain mirrors the HDR path (NVDEC
+# frames arrive as cuda frames; the synthetic source is uploaded the same way).
+test_libplacebo_tonemap() {
+  ffmpeg -nostdin -hide_banner -v error -init_hw_device vulkan=vk -filter_hw_device vk \
+    -f lavfi -i 'testsrc2=size=320x180:rate=24' -t 0.25 \
+    -vf 'setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,format=p010le,hwupload,libplacebo=tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=bt709:format=yuv420p,hwdownload,format=yuv420p' \
+    -f null - </dev/null >/dev/null 2>&1
+}
 if [ "$is_hdr" = "1" ] && [ "$apple_vt_hdr" = "0" ]; then
   case "${PREP_GPU_TONEMAP:-0}" in
     1)
-      if [ "$venc" = "h264_nvenc" ] && echo "$ff_filters" | grep -q libplacebo; then
+      if [ "$venc" = "h264_nvenc" ] && echo "$ff_filters" | grep -q libplacebo && test_libplacebo_tonemap; then
         tonemap_backend=libplacebo
       elif [ "$venc" = "h264_nvenc" ] && echo "$ff_filters" | grep -q tonemap_opencl && test_opencl_tonemap; then
         tonemap_backend=opencl
@@ -1627,8 +1639,10 @@ fi
 # fell back to only {hdr,audio}; that made Linux/Colab bundles lose resolution,
 # source, rendition and per-file metadata.  Keep it self-contained instead: when
 # python3 is present (Colab/Linux normally has it), probe the source and the HLS
-# outputs that were just written and build the detailed manifest here.
-if command -v python3 >/dev/null 2>&1; then
+# outputs that were just written and build the detailed manifest here. A bare
+# `command -v` is not enough: Windows ships a Store stub called python3 that
+# exists but cannot execute, so prove it runs before committing to it.
+if command -v python3 >/dev/null 2>&1 && python3 -c 'pass' >/dev/null 2>&1; then
   python3 - "$input" "$outdir" "$slug" "$hdr" "$audio_badge" \
     "$copy_video" "$want_raw" "$want_hdr" "$source_video_kept" <<'PYINFO'
 import datetime as dt
@@ -1774,6 +1788,19 @@ sub_src = [s for s in streams if s.get("codec_type") == "subtitle"]
 
 sw = as_int(video_src.get("width")) or 0
 sh = as_int(video_src.get("height")) or 0
+# IMAX expanded ratio is 1.90:1 (scope 2.39:1, flat 1.85:1, 16:9 1.78:1).
+dar = str(video_src.get("display_aspect_ratio") or "")
+src_aspect = None
+if ":" in dar:
+    _n, _, _d = dar.partition(":")
+    try:
+        if float(_d) > 0:
+            src_aspect = round(float(_n) / float(_d), 3)
+    except (TypeError, ValueError):
+        src_aspect = None
+if not src_aspect and sw and sh:
+    src_aspect = round(sw / sh, 3)
+src_imax = bool(src_aspect and 1.88 <= src_aspect <= 1.92)
 src_quality = quality_label(sw, sh)
 src_codec = str(video_src.get("codec_name") or "")
 src_pix = str(video_src.get("pix_fmt") or "")
@@ -2037,6 +2064,7 @@ info = {
         "hdr": legacy_hdr,
         "audio": legacy_audio,
         "videoCodec": output_codec.upper() if output_codec else None,
+        "imax": src_imax,
     },
     "source": {
         "fileName": src.name,
@@ -2052,6 +2080,8 @@ info = {
         "width": sw,
         "height": sh,
         "resolution": f"{sw}x{sh}" if sw and sh else None,
+        "aspectRatio": src_aspect,
+        "imax": src_imax,
         "quality": src_quality,
         "pixelFormat": src_pix,
         "bitDepth": src_depth,
@@ -2091,9 +2121,13 @@ else
   elif [ "${video_width:-0}" -ge 700 ] || [ "${video_height:-0}" -ge 480 ]; then quality='480p'
   else quality="${video_height:-0}p"
   fi
-  printf '{"schemaVersion":2,"hdr":%s,"audio":%s,"badges":{"quality":"%s","hdr":%s,"audio":%s,"videoCodec":"%s"},"video":{"codec":"%s","width":%s,"height":%s,"resolution":"%sx%s","quality":"%s"}}\n' \
-    "$hdr" "$audio_badge" "$quality" "$hdr" "$audio_badge" "${out_codec^^}" \
-    "$video_codec" "${video_width:-0}" "${video_height:-0}" "${video_width:-0}" "${video_height:-0}" "$quality" \
+  aspect_json=null; imax_json=false
+  if [ "${video_width:-0}" -gt 0 ] && [ "${video_height:-0}" -gt 0 ]; then
+    read -r aspect_json imax_json <<< "$(awk -v w="$video_width" -v h="$video_height" 'BEGIN { v = w / h; printf "%.3f %s", v, (v >= 1.88 && v <= 1.92) ? "true" : "false" }')"
+  fi
+  printf '{"schemaVersion":2,"hdr":%s,"audio":%s,"badges":{"quality":"%s","hdr":%s,"audio":%s,"videoCodec":"%s","imax":%s},"video":{"codec":"%s","width":%s,"height":%s,"resolution":"%sx%s","aspectRatio":%s,"imax":%s,"quality":"%s"}}\n' \
+    "$hdr" "$audio_badge" "$quality" "$hdr" "$audio_badge" "${out_codec^^}" "$imax_json" \
+    "$video_codec" "${video_width:-0}" "${video_height:-0}" "${video_width:-0}" "${video_height:-0}" "$aspect_json" "$imax_json" "$quality" \
     > "$outdir/${slug}.info.json"
 fi
 

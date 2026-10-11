@@ -56,6 +56,9 @@ PORT = int(os.environ.get("BILI_WEB_PORT", "8787"))
 TRANSFER_ONLY = os.environ.get("BILI_TRANSFER_ONLY") == "1"
 RCLONE_REMOTE = os.environ.get("BILI_RCLONE_REMOTE", "").rstrip("/")
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".mov", ".webm", ".m4v", ".avi", ".ts")
+UPLOAD_DIR = os.path.realpath(os.path.join(DOWNLOADS_DIR, "uploads"))
+# Browser uploads: video plus sidecar subtitles (checked by extension).
+UPLOAD_EXTENSIONS = VIDEO_EXTENSIONS + (".srt", ".ass", ".ssa", ".vtt")
 LOG_TAIL = 128 * 1024  # first view of a log
 LOG_CHUNK = 512 * 1024  # one incremental or "older lines" read
 LOG_FULL_LIMIT = 32 * 1024 * 1024  # log download
@@ -117,11 +120,40 @@ def stop_process_group(process, timeout=10):
         pass
 
 
+def video_aspect(video_stream, width=0, height=0):
+    """Display aspect ratio and IMAX flag from an ffprobe video stream dict.
+
+    IMAX expanded ratio is 1.90:1; scope is 2.39:1, flat 1.85:1, 16:9 1.78:1.
+    Returns (aspect_ratio or None, imax bool). Prefers the container's display
+    aspect when present, else pixel dimensions.
+    """
+    aspect_ratio = 0.0
+    dar = str((video_stream or {}).get("display_aspect_ratio") or "")
+    if ":" in dar:
+        num, _, den = dar.partition(":")
+        try:
+            if float(den) > 0:
+                aspect_ratio = float(num) / float(den)
+        except (TypeError, ValueError):
+            aspect_ratio = 0.0
+    if not aspect_ratio:
+        try:
+            w, h = int(width or 0), int(height or 0)
+        except (TypeError, ValueError):
+            w, h = 0, 0
+        if w > 0 and h > 0:
+            aspect_ratio = w / h
+    if not aspect_ratio:
+        return None, False
+    aspect_ratio = round(aspect_ratio, 3)
+    return aspect_ratio, 1.88 <= aspect_ratio <= 1.92
+
+
 def probe_media(target, path, name, timeout=30):
     """ffprobe summary of one media file (a local path or an http URL) for the UI."""
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", target],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or "ffprobe failed").strip()[-800:])
@@ -143,12 +175,15 @@ def probe_media(target, path, name, timeout=30):
             ["ffprobe", "-v", "error", "-select_streams", selector,
              "-read_intervals", "%+#1", "-show_packets", "-show_entries",
              "packet=pts_time", "-of", "default=nw=1:nk=1", target],
-            capture_output=True, text=True, timeout=max(15, timeout // 2),
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=max(15, timeout // 2),
         )
         return number((packet.stdout or "0").splitlines()[0] if packet.stdout else 0)
 
     side_data = video_stream.get("side_data_list") or []
     transfer = video_stream.get("color_transfer") or ""
+    width = int(number(video_stream.get("width")))
+    height = int(number(video_stream.get("height")))
+    aspect_ratio, imax = video_aspect(video_stream, width, height)
     return {
         "path": path, "name": name,
         "size": int(number(fmt.get("size"))),
@@ -156,7 +191,9 @@ def probe_media(target, path, name, timeout=30):
         "bit_rate": int(number(fmt.get("bit_rate"))),
         "video": {
             "codec": video_stream.get("codec_name"), "profile": video_stream.get("profile"),
-            "width": video_stream.get("width"), "height": video_stream.get("height"),
+            "width": width or None, "height": height or None,
+            "aspect_ratio": aspect_ratio or None,
+            "imax": imax,
             "pix_fmt": video_stream.get("pix_fmt"),
             "fps": video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate"),
             "bit_rate": int(number(video_stream.get("bit_rate"))),
@@ -208,6 +245,12 @@ def enqueue_process(body, pipeline=None):
         json.dump(meta, f, ensure_ascii=False, indent=2)
     queue.submit(job, "convert", [sys.executable, PROCESS_MEDIA, config_path, state_path])
     return job
+
+
+def safe_upload_name(name):
+    """Filesystem-safe basename for a browser-uploaded file."""
+    cleaned = re.sub(r'[\\/\x00-\x1f\x7f]', '_', os.path.basename(str(name or ""))).rstrip(" .")[:200]
+    return cleaned or "upload"
 
 
 def remote_relative(value):
@@ -290,11 +333,11 @@ def finish_remote_pipeline(upload_item, pipeline, bundles, remote_dirs=None):
     for index, bundle in enumerate(bundles):
         name = remote_dirs[index] if remote_dirs else os.path.basename(str(bundle).rstrip("/"))
         listing = subprocess.run(["rclone", "lsf", remote_spec(name), "--include", "*.m3u8"],
-                                 capture_output=True, text=True, timeout=120)
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         if listing.returncode or not listing.stdout.strip():
             append_log(upload_item, f"kept remote original {source}: no uploaded playlist found in {name}")
             return
-    result = subprocess.run(["rclone", "deletefile", remote_spec(source)], capture_output=True, text=True, timeout=120)
+    result = subprocess.run(["rclone", "deletefile", remote_spec(source)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
     if result.returncode:
         append_log(upload_item, f"could not delete remote original {source}: {result.stderr.strip()[-300:]}")
     else:
@@ -610,7 +653,7 @@ function fmtDur(n){ n=Math.round(+n||0); return [Math.floor(n/3600),Math.floor(n
 function fmtFps(v){ const p=String(v||'').split('/').map(Number); return p.length===2&&p[1]?(p[0]/p[1]).toFixed(3).replace(/0+$/,'').replace(/\\.$/,''):String(v||'?') }
 function renderMedia(rows){ return rows.map(m=>`<div class=media-card><h3>${esc(m.name)}</h3><div class=facts>
   <div class=fact><small>Size / duration</small>${fmt(m.size)} · ${fmtDur(m.duration)}</div>
-  <div class=fact><small>Video</small>${esc(m.video.codec||'none')} ${esc(m.video.profile||'')} · ${m.video.width||'?'}×${m.video.height||'?'}</div>
+  <div class=fact><small>Video</small>${esc(m.video.codec||'none')} ${esc(m.video.profile||'')} · ${m.video.width||'?'}×${m.video.height||'?'}${m.video.aspect_ratio?' · '+m.video.aspect_ratio.toFixed(2)+':1':''}${m.video.imax?' · IMAX':''}</div>
   <div class=fact><small>Video bitrate</small>${fmtRate(m.video.bit_rate)}</div>
   <div class=fact><small>Color</small>${esc(m.video.pix_fmt||'?')} · ${m.video.hdr?'HDR':'SDR'}${m.video.dolby_vision?' · Dolby Vision':''}</div>
   <div class=fact><small>Frame rate</small>${fmtFps(m.video.fps)} fps</div>
@@ -803,6 +846,7 @@ class H(BaseHTTPRequestHandler):
         "/api/upload": "handle_upload",
         "/api/probe": "handle_probe",
         "/api/files/downloads": "handle_list_downloads",
+        "/api/files/upload": "handle_file_upload",
         "/api/files/drive": "handle_list_drive",
         "/api/delete/downloads": "handle_delete_downloads",
         "/api/delete/drive": "handle_delete_drive",
@@ -810,11 +854,13 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            handler = self.ROUTES.get(self.path)
+            handler = self.ROUTES.get(self.path.split("?", 1)[0])
             if not handler:
                 return self._send(404, json.dumps({"error": "not found"}))
             if not self._authed():
                 return
+            if handler == "handle_file_upload":
+                return self.handle_file_upload()
             getattr(self, handler)(self._json_body())
         except Exception as e:  # noqa: BLE001 — surface any error as JSON to the UI
             self._send(500, json.dumps({"error": str(e)}))
@@ -850,7 +896,7 @@ class H(BaseHTTPRequestHandler):
         env = {**os.environ, "BILI_PARSE_ONLY": "1"}
         r = subprocess.run(
             [sys.executable, BILI_PULL, url],
-            env=env, capture_output=True, text=True, timeout=150,
+            env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=150,
         )
         if r.returncode != 0:
             return self._send(502, json.dumps({"error": (r.stderr or "parse failed").strip()[-800:]}))
@@ -1070,7 +1116,7 @@ class H(BaseHTTPRequestHandler):
         if body.get("recursive") is True:
             return self.handle_remote_list_videos(relative)
         result = subprocess.run(["rclone", "lsjson", remote_spec(relative), "--no-mimetype"],
-                                capture_output=True, text=True, timeout=120)
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         if result.returncode:
             return self._send(502, json.dumps({"error": (result.stderr or "rclone lsjson failed").strip()[-500:]}))
         items = []
@@ -1093,7 +1139,7 @@ class H(BaseHTTPRequestHandler):
         command = ["rclone", "lsjson", remote_spec(relative), "--no-mimetype", "-R", "--files-only"]
         for pattern in patterns:
             command += ["--include", pattern]
-        result = subprocess.run(command + ["--ignore-case"], capture_output=True, text=True, timeout=300)
+        result = subprocess.run(command + ["--ignore-case"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
         if result.returncode:
             return self._send(502, json.dumps({"error": (result.stderr or "rclone lsjson failed").strip()[-500:]}))
         entries = json.loads(result.stdout or "[]")
@@ -1146,6 +1192,63 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, json.dumps({"error": f"invalid downloaded file: {path}"}))
         job = enqueue_upload([os.path.realpath(path) for path in files], "source")
         self._send(200, json.dumps({"job": job}))
+
+    def handle_file_upload(self):
+        """Save a browser-uploaded media file into downloads/uploads/.
+
+        The request body is the raw file bytes; the original name rides in the
+        URL-quoted X-Filename header. Streamed to disk in chunks so multi-GB
+        files never sit fully in memory. Only media/subtitle extensions pass;
+        the name is flattened to a basename and deduped with a counter.
+        """
+        try:
+            total = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            total = 0
+        if total <= 0:
+            return self._send(411, json.dumps({"error": "missing Content-Length"}))
+        name = safe_upload_name(unquote(self.headers.get("X-Filename") or ""))
+        if os.path.splitext(name)[1].lower() not in UPLOAD_EXTENSIONS:
+            return self._send(400, json.dumps(
+                {"error": f"only {', '.join(UPLOAD_EXTENSIONS)} files can be uploaded"}))
+        try:
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+        except OSError as exc:
+            return self._send(500, json.dumps({"error": f"cannot create upload folder: {exc}"}))
+        dest = os.path.join(UPLOAD_DIR, name)
+        base, suffix = os.path.splitext(name)
+        counter = 2
+        while os.path.exists(dest) and counter < 100000:
+            dest = os.path.join(UPLOAD_DIR, f"{base} ({counter}){suffix}")
+            counter += 1
+        if os.path.exists(dest):
+            return self._send(409, json.dumps({"error": "too many files with that name"}))
+        received = 0
+        try:
+            with open(dest, "wb") as handle:
+                while received < total:
+                    chunk = self.rfile.read(min(1024 * 1024, total - received))
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    received += len(chunk)
+        except OSError as exc:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            return self._send(500, json.dumps({"error": f"cannot save upload: {exc}"}))
+        if received != total:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            return self._send(400, json.dumps(
+                {"error": f"incomplete upload ({received}/{total} bytes)"}))
+        self._send(200, json.dumps({
+            "name": os.path.basename(dest), "path": dest,
+            "relative": os.path.relpath(dest, DOWNLOADS_DIR), "size": received,
+        }))
 
     def handle_log(self, body):
         """Read a job log by byte range so the viewer can follow it incrementally.
@@ -1256,7 +1359,7 @@ class H(BaseHTTPRequestHandler):
             raise RuntimeError("Bili23 task IDs are not ready yet; try again shortly")
         result = subprocess.run(
             [sys.executable, BILI_PULL, f"--{action}", *task_ids],
-            env=os.environ, capture_output=True, text=True, timeout=45,
+            env=os.environ, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45,
         )
         if result.returncode:
             raise RuntimeError((result.stderr or result.stdout or f"Bili23 {action} failed").strip()[-800:])
@@ -1304,7 +1407,7 @@ class H(BaseHTTPRequestHandler):
         try:
             result = subprocess.run(
                 ["systemctl", "is-active", "bili23.service"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             bili23 = (result.stdout or "unknown").strip()
         except (OSError, subprocess.TimeoutExpired):
@@ -1355,7 +1458,7 @@ class H(BaseHTTPRequestHandler):
             port = probe_socket.getsockname()[1]
         server = subprocess.Popen(
             ["rclone", "serve", "http", RCLONE_REMOTE, "--addr", f"127.0.0.1:{port}", "--read-only"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", start_new_session=True,
         )
         try:
             deadline = time.time() + 30
@@ -1566,7 +1669,7 @@ class H(BaseHTTPRequestHandler):
     def handle_list_drive(self, body):
         r = subprocess.run(
             ["node", DRIVE_FILES, "list"],
-            env={**os.environ}, capture_output=True, text=True, timeout=90,
+            env={**os.environ}, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90,
         )
         if r.returncode != 0:
             return self._send(502, json.dumps({"error": (r.stderr or "drive list failed").strip()[-800:]}))
@@ -1578,7 +1681,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(400, json.dumps({"error": "no ids"}))
         r = subprocess.run(
             ["node", DRIVE_FILES, "delete", *ids],
-            env={**os.environ}, capture_output=True, text=True, timeout=300,
+            env={**os.environ}, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
         )
         if r.returncode != 0:
             return self._send(502, json.dumps({"error": (r.stderr or "drive delete failed").strip()[-800:]}))

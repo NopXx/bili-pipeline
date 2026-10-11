@@ -19,6 +19,31 @@ DOWNLOADS = Path(os.environ.get("BILI_DOWNLOADS_DIR", "/opt/bili-downloads")).re
 HLS_ROOT = Path(os.environ.get("BILI_HLS_DIR", "/opt/bili-hls")).resolve()
 
 
+def find_bash():
+    """A bash that can actually run prep-hls.sh (override with BILI_BASH).
+
+    On Windows a bare `bash` is the WSL relay, which fails with no distro
+    installed; prefer Git Bash, else whatever is on PATH.
+    """
+    override = os.environ.get("BILI_BASH")
+    if override:
+        return override
+    if os.name == "nt":
+        for candidate in (r"C:\Program Files\Git\bin\bash.exe",
+                          r"C:\Program Files (x86)\Git\bin\bash.exe"):
+            if os.path.isfile(candidate):
+                return candidate
+    return "bash"
+
+
+def to_bash_path(path):
+    """ MSYS/Git Bash wants POSIX paths (D:\\movie\\x -> /d/movie/x)."""
+    text = str(path).replace("\\", "/")
+    if len(text) >= 3 and text[1] == ":" and text[0].isalpha() and text[2] == "/":
+        return f"/{text[0].lower()}/{text[3:]}"
+    return text
+
+
 # rclone --stats-one-line summary. Newer builds print
 # `208.382 MiB / 8.501 GiB, 2%, 32.095 MiB/s, ETA 4m24s`; older ones (e.g.
 # Ubuntu's apt package) print `188.371M / 13.341 GBytes, 1%, 38.707 MBytes/s`.
@@ -45,7 +70,7 @@ def probe(path):
     raw = subprocess.check_output([
         "ffprobe", "-v", "error", "-show_streams", "-show_format",
         "-of", "json", str(path),
-    ], text=True)
+    ], text=True, encoding="utf-8", errors="replace")
     return json.loads(raw)
 
 
@@ -91,7 +116,7 @@ def _human_speed(bytes_per_sec):
 def run_with_progress(command, env, total, label, state_path):
     proc = subprocess.Popen(
         command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, errors="replace", bufsize=1,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
     )
     last_percent = -1
     last_hls_log_at = 0.0
@@ -264,6 +289,23 @@ def main():
             raise RuntimeError(f"invalid downloaded file: {path}")
 
     env = {**os.environ, **engine_env(config)}
+    if os.name == "nt":
+        # Git Bash has no python3 (Windows Python ships python.exe only, and
+        # the Store stub called python3 cannot execute), so the engine would
+        # fall back to a minimal manifest. Point python3 at this interpreter
+        # with an extensionless wrapper (a .cmd is invisible to MSYS bash).
+        shim_dir = Path(tempfile.gettempdir()) / "bili-pipeline-bin"
+        try:
+            shim_dir.mkdir(exist_ok=True)
+            shim = shim_dir / "python3"
+            if not shim.is_file():
+                shim.write_text(
+                    "#!/bin/sh\nexec \"" + to_bash_path(sys.executable) + "\" \"$@\"\n",
+                    encoding="utf-8", newline="\n",
+                )
+            env["PATH"] = str(shim_dir) + os.pathsep + env.get("PATH", "")
+        except OSError as exc:
+            print(f"warning: cannot install python3 shim ({exc}); manifest falls back", flush=True)
 
     # Upload the original files straight to Drive, no HLS conversion. Each file
     # lands in its own sub-folder (drive_upload.mjs), and the per-file "uploaded"
@@ -307,7 +349,8 @@ def main():
             print(f"==> [{index}/{len(files)}] preparing HLS: {source.name}", flush=True)
             output = parent / source.stem.rstrip(" .")
             update_state(state_path, phase="hls", current_file=str(source), progress=0, eta_seconds=None)
-            run_with_progress(["bash", str(PREP), str(source), str(output)], env, total, "HLS", state_path)
+            run_with_progress([find_bash(), to_bash_path(PREP), to_bash_path(source),
+                               to_bash_path(output)], env, total, "HLS", state_path)
             outputs.append(str(output.resolve()))
             update_state(state_path, outputs=outputs)
         update_state(state_path, phase="converted", status="completed", progress=100, outputs=outputs, eta_seconds=None)

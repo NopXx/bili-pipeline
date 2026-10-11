@@ -95,6 +95,11 @@ code{font-family:var(--mono);font-size:.92em;background:var(--card2);padding:1px
 .small-select{width:auto;padding:6px 8px;font-size:13px}
 .selection{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#4f8cff14;border:1px solid #4f8cff44;border-radius:10px;padding:8px 10px;margin-bottom:8px}
 .selection span{flex:1;font-size:13px}
+.uploads{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
+.upload-row{display:flex;align-items:center;gap:10px;font-size:13px}
+.upload-row .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.upload-row progress{flex:1;height:8px;min-width:80px}
+.upload-row .when{color:var(--muted);font-size:12.5px;white-space:nowrap}
 .files{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-top:8px}
 .empty{padding:28px 12px;text-align:center;color:var(--faint)}
 

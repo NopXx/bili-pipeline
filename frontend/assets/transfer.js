@@ -13,7 +13,7 @@ createApp({
     biliUrl: '', episodes: [], selectedEpisodes: [], parsing: false,
     biliOptions: { ...BILI_DEFAULTS, ...Shared.load('bili-options', {}), redownload: false },
     BILI_QUALITIES: Shared.BILI_QUALITIES, BILI_CODECS: Shared.BILI_CODECS, BILI_AUDIO: Shared.BILI_AUDIO,
-    files: [], selectedFiles: [], fileSearch: '', fileSort: 'size', filesLoadedAt: 0,
+    files: [], selectedFiles: [], fileSearch: '', fileSort: 'size', filesLoadedAt: 0, uploads: [],
     jobs: [], jobFilter: 'all', laneFilter: 'all', jobSearch: '', logJob: '',
     now: Date.now(), clockSkew: 0, healthAt: 0, timer: null,
   } },
@@ -205,6 +205,40 @@ createApp({
         this.view = 'queue'
         this.loadJobs()
       } catch (error) { this.fail(error) }
+    },
+    chooseLocalFiles() { this.$refs.localInput.click() },
+    async uploadLocalFiles(event) {
+      const files = [...(event.target.files || [])]
+      event.target.value = ''
+      if (!files.length) return
+      for (const file of files) {
+        const row = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, name: file.name, loaded: 0, total: file.size || 1, status: 'รอ…' }
+        this.uploads.push(row)
+        try {
+          await this.uploadOneFile(file, row)
+          row.loaded = row.total
+          row.status = 'เสร็จ'
+        } catch (error) { row.status = `ล้มเหลว: ${error.message}` }
+      }
+      await this.loadFiles()
+      setTimeout(() => { this.uploads = this.uploads.filter(u => u.status !== 'เสร็จ') }, 8000)
+    },
+    uploadOneFile(file, row) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', '/api/files/upload')
+        xhr.setRequestHeader('X-Token', this.token)
+        xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name))
+        xhr.upload.onprogress = e => { if (e.lengthComputable) { row.loaded = e.loaded; row.total = e.total } }
+        xhr.onload = () => {
+          if (xhr.status === 200) return resolve()
+          let message = `HTTP ${xhr.status}`
+          try { message = JSON.parse(xhr.responseText).error || message } catch {}
+          reject(new Error(message))
+        }
+        xhr.onerror = () => reject(new Error('ติดต่อเซิร์ฟเวอร์ไม่ได้'))
+        xhr.send(file)
+      })
     },
     async deleteFiles() {
       const paths = [...this.selectedFiles]

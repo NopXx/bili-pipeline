@@ -36,7 +36,7 @@ def check_remote_header(source, ext):
 def copy(source, local, state_path, extra):
     command = ["rclone", "copyto", source, str(local), "--retries", "3", "--low-level-retries", "10",
                "--stats=2s", "--stats-one-line", "--stats-log-level", "NOTICE", *extra]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1)
     last = None
     assert process.stdout is not None
     for line in process.stdout:
@@ -62,7 +62,7 @@ def verify(local, ext):
     if ext in (".mkv", ".webm") and not head.startswith(EBML):
         raise RuntimeError(f"downloaded MKV/WebM has an invalid header: {hexbytes(head[:8])}")
     probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=format_name,duration", "-of", "json", str(local)],
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     if probe.returncode:
         raise RuntimeError("ffprobe cannot read the downloaded file: " + probe.stderr.strip()[-400:])
     info = json.loads(probe.stdout or "{}").get("format", {})

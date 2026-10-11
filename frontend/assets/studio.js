@@ -191,7 +191,7 @@ createApp({
     driveLink: '',
     remote: { root: '', path: '', items: [], selected: [], sizes: {}, busy: false, error: '', loaded: false, deleteSource: false, probes: {}, probing: false },
     remoteProbeTimer: null, remoteSort: Shared.load('studio-remote-sort', 'name'),
-    files: [], selectedFiles: [], fileSearch: '', fileSort: 'modified', filesLoadedAt: 0,
+    files: [], selectedFiles: [], fileSearch: '', fileSort: 'modified', filesLoadedAt: 0, uploads: [],
     convertFiles: [], probe: [], probeBusy: false, inspected: [],
     config: { ...structuredClone(HLS_DEFAULTS), ...Shared.load('studio-hls', {}) },
   } },
@@ -289,6 +289,7 @@ createApp({
     ago(epoch) { return Shared.ago(epoch, this.now) },
     modifiedLabel(iso) { const t = Date.parse(iso); return Number.isFinite(t) ? Shared.ago(t / 1000, this.now) : '' },
     fps(v) { const p = String(v || '').split('/').map(Number); return p.length === 2 && p[1] ? (p[0] / p[1]).toFixed(3).replace(/0+$/, '').replace(/\.$/, '') : v || '?' },
+    aspect(v) { return v ? (+v).toFixed(2) + ':1' : '?' },
     sourceBitrate(m) {
       const audio = (m.audio || []).reduce((n, a) => n + (+a.bit_rate || 0), 0)
       const rate = +m.video?.bit_rate || Math.max(0, (+m.bit_rate || (+m.size || 0) * 8 / (+m.duration || 1)) - audio)
@@ -494,6 +495,40 @@ createApp({
       if (!this.selectedFiles.length) return
       this.probeBusy = true
       try { this.inspected = await this.api('/api/probe', { paths: this.selectedFiles }) } catch (error) { this.fail(error) } finally { this.probeBusy = false }
+    },
+    chooseLocalFiles() { this.$refs.localInput.click() },
+    async uploadLocalFiles(event) {
+      const files = [...(event.target.files || [])]
+      event.target.value = ''
+      if (!files.length) return
+      for (const file of files) {
+        const row = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, name: file.name, loaded: 0, total: file.size || 1, status: 'รอ…' }
+        this.uploads.push(row)
+        try {
+          await this.uploadOneFile(file, row)
+          row.loaded = row.total
+          row.status = 'เสร็จ'
+        } catch (error) { row.status = `ล้มเหลว: ${error.message}` }
+      }
+      await this.loadFiles()
+      setTimeout(() => { this.uploads = this.uploads.filter(u => u.status !== 'เสร็จ') }, 8000)
+    },
+    uploadOneFile(file, row) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', '/api/files/upload')
+        xhr.setRequestHeader('X-Token', this.token)
+        xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name))
+        xhr.upload.onprogress = e => { if (e.lengthComputable) { row.loaded = e.loaded; row.total = e.total } }
+        xhr.onload = () => {
+          if (xhr.status === 200) return resolve()
+          let message = `HTTP ${xhr.status}`
+          try { message = JSON.parse(xhr.responseText).error || message } catch {}
+          reject(new Error(message))
+        }
+        xhr.onerror = () => reject(new Error('ติดต่อเซิร์ฟเวอร์ไม่ได้'))
+        xhr.send(file)
+      })
     },
     async uploadSource() {
       if (!confirm(`อัปโหลดไฟล์ต้นฉบับ ${this.selectedFiles.length} ไฟล์ขึ้น Drive โดยไม่แปลง HLS?`)) return

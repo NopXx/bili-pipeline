@@ -130,6 +130,6 @@ def status():
 def restart_bili23():
     command = os.environ.get("BILI23_RESTART_CMD", "systemctl restart bili23.service")
     # bili23_headless.py restart waits for Bili23 to stop and its MCP to answer.
-    result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=180)
+    result = subprocess.run(command, shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout or f"exit code {result.returncode}").strip()[-600:])

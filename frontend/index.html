@@ -218,9 +218,10 @@
                   <div class="source-head">
                     <h3>{{m.name}}</h3>
                     <span class="tag" :class="m.video.hdr ? 'hdr' : ''">{{m.video.hdr ? 'HDR' : 'SDR'}}</span>
+                    <span class="tag imax" v-if="m.video.imax">IMAX</span>
                   </div>
                   <div class="facts">
-                    <div><small>วิดีโอ</small>{{m.video.codec}} · {{m.video.width}}×{{m.video.height}}</div>
+                    <div><small>วิดีโอ</small>{{m.video.codec}} · {{m.video.width}}×{{m.video.height}} · {{aspect(m.video.aspect_ratio)}}</div>
                     <div><small>Bitrate วิดีโอ</small>{{sourceBitrate(m)}}</div>
                     <div><small>ความยาว</small>{{clock(m.duration)}}</div>
                     <div><small>เสียง</small><span v-for="(a, i) in m.audio" :key="a.index">{{i ? ' · ' : ''}}{{a.language}} {{a.codec}} {{a.channels}}ch{{a.default ? ' ★' : ''}}</span></div>
@@ -253,6 +254,15 @@
               <option value="modified">ใหม่สุดก่อน</option><option value="size">ใหญ่สุดก่อน</option><option value="name">ชื่อ A–Z</option>
             </select>
             <button class="ghost small" @click="loadFiles">รีเฟรช</button>
+            <button class="small" @click="chooseLocalFiles">จากเครื่อง</button>
+            <input ref="localInput" type="file" multiple accept=".mkv,.mp4,.mov,.webm,.m4v,.avi,.ts,.srt,.ass,.ssa,.vtt" @change="uploadLocalFiles" hidden>
+          </div>
+          <div class="uploads" v-if="uploads.length">
+            <div class="upload-row" v-for="u in uploads" :key="u.id">
+              <span class="name">{{u.name}}</span>
+              <progress :value="u.loaded" :max="u.total || 1"></progress>
+              <span class="when">{{u.status}}</span>
+            </div>
           </div>
           <div class="selection" v-if="selectedFiles.length">
             <span>เลือก {{selectedFiles.length}} ไฟล์ · {{size(selectedFilesSize)}}</span>
@@ -275,7 +285,7 @@
               <h3>{{m.name}}</h3>
               <div class="facts">
                 <div><small>ขนาด · ความยาว</small>{{size(m.size)}} · {{clock(m.duration)}}</div>
-                <div><small>วิดีโอ</small>{{m.video.codec}} {{m.video.profile}} · {{m.video.width}}×{{m.video.height}}</div>
+                <div><small>วิดีโอ</small>{{m.video.codec}} {{m.video.profile}} · {{m.video.width}}×{{m.video.height}} · {{aspect(m.video.aspect_ratio)}}<span v-if="m.video.imax"> · IMAX</span></div>
                 <div><small>Bitrate</small>{{sourceBitrate(m)}}</div>
                 <div><small>สี</small>{{m.video.pix_fmt}} · {{m.video.hdr ? 'HDR' : 'SDR'}}</div>
               </div>
@@ -300,11 +310,12 @@
                 <div class="source-head">
                   <h3>{{m.name}}</h3>
                   <span class="tag" :class="m.video.hdr ? 'hdr' : ''">{{m.video.hdr ? (m.video.dolby_vision ? 'HDR · Dolby Vision' : 'HDR') : 'SDR'}}</span>
+                  <span class="tag imax" v-if="m.video.imax">IMAX</span>
                   <button class="ghost small" @click="removeConvertFile(m.path)" aria-label="เอาออก">✕</button>
                 </div>
                 <div class="facts">
                   <div><small>ขนาด · ความยาว</small>{{size(m.size)}} · {{clock(m.duration)}}</div>
-                  <div><small>วิดีโอ</small>{{m.video.codec}} {{m.video.profile}} · {{m.video.width}}×{{m.video.height}}</div>
+                  <div><small>วิดีโอ</small>{{m.video.codec}} {{m.video.profile}} · {{m.video.width}}×{{m.video.height}} · {{aspect(m.video.aspect_ratio)}}</div>
                   <div><small>Bitrate · FPS</small>{{sourceBitrate(m)}} · {{fps(m.video.fps)}} fps</div>
                   <div><small>สี</small>{{m.video.pix_fmt}}</div>
                   <div><small>ซับไตเติล</small>{{m.subtitles.length || 'ไม่มี'}}</div>

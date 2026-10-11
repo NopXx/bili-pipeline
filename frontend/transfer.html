@@ -164,6 +164,15 @@
               <option value="name">ชื่อ A–Z</option>
             </select>
             <button class="ghost small" @click="loadFiles">รีเฟรช</button>
+            <button class="small" @click="chooseLocalFiles">จากเครื่อง</button>
+            <input ref="localInput" type="file" multiple accept=".mkv,.mp4,.mov,.webm,.m4v,.avi,.ts,.srt,.ass,.ssa,.vtt" @change="uploadLocalFiles" hidden>
+          </div>
+          <div class="uploads" v-if="uploads.length">
+            <div class="upload-row" v-for="u in uploads" :key="u.id">
+              <span class="name">{{u.name}}</span>
+              <progress :value="u.loaded" :max="u.total || 1"></progress>
+              <span class="when">{{u.status}}</span>
+            </div>
           </div>
           <div class="selection" v-if="selectedFiles.length">
             <span>เลือก {{selectedFiles.length}} ไฟล์ · {{size(selectedFilesSize)}}</span>

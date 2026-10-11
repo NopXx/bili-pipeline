@@ -24,7 +24,7 @@ def visible_convert_gpus():
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,
         )
         if result.returncode == 0:
             return [line.strip() for line in result.stdout.splitlines() if line.strip().isdigit()][:2]
