@@ -118,12 +118,24 @@ slug=$(basename "${input%.*}" | tr ' ' '-' | tr -cd '[:alnum:]._-')
 
 mkdir -p "$outdir"
 
+# Native Windows tools (ffmpeg/ffprobe/python from the Windows PATH) do not
+# understand POSIX paths, and MSYS skips its automatic path conversion for
+# names with glob characters such as [YTS.MX] — so resolve once to Windows
+# paths for every native call below. Bash-level file ops keep the POSIX form.
+if command -v cygpath >/dev/null 2>&1; then
+  WIN_INPUT=$(cygpath -w "$input")
+  WIN_OUTDIR=$(cygpath -w "$outdir")
+else
+  WIN_INPUT=$input
+  WIN_OUTDIR=$outdir
+fi
+
 # ffprobe's key=value output, parsed in bash: a JSON parser would mean python,
 # and python is one more thing to have installed on a Windows box.
 list_streams() {
   ffprobe -v error -select_streams "$1" \
     -show_entries stream=index,codec_name,channels,bit_rate:stream_tags=language,title:stream_disposition=default \
-    -of default=nw=1 "$input" |
+    -of default=nw=1 "$WIN_INPUT" |
     awk -F= '
       BEGIN { sep = sprintf("%c", 28) }
       /^index=/ { if (n++) print line; line = "" ; codec = ""; channels = "2"; bitrate = ""; lang = "und"; title = ""; dflt = "0" }
@@ -144,7 +156,7 @@ list_streams() {
 # decide whether it needs tonemapping and what to write in the master's CODECS.
 # Parsed key=value, because a profile like "Main 10" carries a space that a
 # positional read would split.
-probe_video() { ffprobe -v error -select_streams v:0 -show_entries "stream=$1" -of default=nw=1:nk=1 "$input" | head -1; }
+probe_video() { ffprobe -v error -select_streams v:0 -show_entries "stream=$1" -of default=nw=1:nk=1 "$WIN_INPUT" | head -1; }
 video_codec=$(probe_video codec_name)
 video_profile=$(probe_video profile)
 video_level=$(probe_video level)
@@ -234,10 +246,10 @@ set_rung_scale() {
 # the size the GUI estimated. Derive the video bitrate the way the GUI does
 # (prep-hls-gui-mac.swift): the file's overall rate minus the audio tracks.
 if ! [[ "${video_bitrate:-}" =~ ^[0-9]+$ ]]; then
-  src_size=$(ffprobe -v error -show_entries format=size -of default=nw=1:nk=1 "$input")
-  src_dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$input")
+  src_size=$(ffprobe -v error -show_entries format=size -of default=nw=1:nk=1 "$WIN_INPUT")
+  src_dur=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$WIN_INPUT")
   audio_bps=$(ffprobe -v error -select_streams a -show_entries stream=bit_rate \
-    -of default=nw=1:nk=1 "$input" | awk '/^[0-9]+$/ { s += $1 } END { print s + 0 }')
+    -of default=nw=1:nk=1 "$WIN_INPUT" | awk '/^[0-9]+$/ { s += $1 } END { print s + 0 }')
   video_bitrate=$(awk -v sz="${src_size:-0}" -v du="${src_dur:-0}" -v ab="$audio_bps" \
     'BEGIN { if (du > 0) { v = sz * 8 / du - ab; if (v > 0) { printf "%.0f", v; exit } } print "" }')
 fi
@@ -291,7 +303,7 @@ case "$video_transfer" in smpte2084 | arib-std-b67) is_hdr=1 ;; esac
 # Swallow that (2>/dev/null, || true): a build that cannot report the DV side data
 # also cannot preserve DV, so treating it as "no DV" is correct — has_dovi stays 0.
 dovi_probe=$({ ffprobe -v error -select_streams v:0 \
-  -show_entries stream_side_data=side_data_type,dv_profile,dv_level,dv_bl_signal_compatibility_id -of default=nw=1 "$input" 2>/dev/null || true; } |
+  -show_entries stream_side_data=side_data_type,dv_profile,dv_level,dv_bl_signal_compatibility_id -of default=nw=1 "$WIN_INPUT" 2>/dev/null || true; } |
   awk -F= '
     /^side_data_type=/ { active = (tolower($2) ~ /dovi|dolby vision/); if (active) found=1; profile=""; level=""; compat="" }
     active && /^dv_profile=/ { profile=$2 }
@@ -400,7 +412,7 @@ fi
 # long job; if hardware setup fails, retain the proven CPU tone-map path rather
 # than aborting the whole queue after output files have been opened.
 if [ "$apple_vt_hdr" = "1" ] && ! ffmpeg -nostdin -v error \
-  -hwaccel videotoolbox -hwaccel_output_format videotoolbox_vld -i "$input" \
+  -hwaccel videotoolbox -hwaccel_output_format videotoolbox_vld -i "$WIN_INPUT" \
   -frames:v 1 -an \
   -vf 'scale_vt=w=-2:h=64:color_matrix=bt709:color_primaries=bt709:color_transfer=bt709,hwdownload,format=p010le,format=nv12' \
   -f null -; then
@@ -467,7 +479,7 @@ fi
 # only those codecs, and only after a real one-frame decode.
 opencl_nvdec=0
 if [ "$tonemap_backend" = "opencl" ] && { [ "$video_codec" = "hevc" ] || [ "$video_codec" = "h264" ]; } &&
-  ffmpeg -nostdin -hide_banner -v error -hwaccel cuda -i "$input" -frames:v 1 -f null - </dev/null >/dev/null 2>&1; then
+  ffmpeg -nostdin -hide_banner -v error -hwaccel cuda -i "$WIN_INPUT" -frames:v 1 -f null - </dev/null >/dev/null 2>&1; then
   opencl_nvdec=1
 fi
 opencl_tonemap_filter="format=p010le,hwupload,tonemap_opencl=tonemap=hable:desat=0:format=nv12:primaries=bt709:transfer=bt709:matrix=bt709:range=tv,hwdownload,format=nv12,format=yuv420p"
@@ -1280,8 +1292,8 @@ while IFS=$'\034' read -r codec channels language title bitrate dflt; do
   sub_index=$((sub_index + 1))
   case "$codec" in
     subrip | ass | ssa | mov_text | webvtt | text)
-      out="$outdir/${slug}.sub-${language}-${i}.vtt"
-      ffmpeg -nostdin -v error -y -i "$input" -map "0:s:$i" -c:s webvtt "$out"
+      out="$WIN_OUTDIR/${slug}.sub-${language}-${i}.vtt"
+      ffmpeg -nostdin -v error -y -i "$WIN_INPUT" -map "0:s:$i" -c:s webvtt "$out"
       echo "subtitle $i: $codec $language -> $(basename "$out")"
       ;;
     *)
@@ -1297,7 +1309,7 @@ echo "writing HLS to $outdir/${slug}.m3u8"
 # readable fields into a download-style percentage bar instead. The duration is
 # read independently from the container, so this also works when stream bit_rate
 # is N/A (common with MKV/WEB-DL files).
-progress_duration=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$input" 2>/dev/null | head -1)
+progress_duration=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$WIN_INPUT" 2>/dev/null | head -1)
 progress_duration_us=0
 if [[ "${progress_duration:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   progress_duration_us=$(awk -v d="$progress_duration" 'BEGIN { printf "%.0f", d * 1000000 }')
@@ -1390,7 +1402,7 @@ fi
 # compact line rather than dumping frame/fps/out_time fields into Colab output.
 # Keep stderr untouched so real FFmpeg warnings/errors are still visible.
 set +e
-ffmpeg -nostdin -v warning -nostats -stats_period 1 -progress pipe:1 -y "${input_args[@]}" -i "$input" \
+ffmpeg -nostdin -v warning -nostats -stats_period 1 -progress pipe:1 -y "${input_args[@]}" -i "$WIN_INPUT" \
   "${fc_args[@]}" \
   "${maps[@]}" \
   "${video_args[@]}" \
@@ -1402,10 +1414,10 @@ ffmpeg -nostdin -v warning -nostats -stats_period 1 -progress pipe:1 -y "${input
   -hls_segment_type fmp4 \
   -hls_flags single_file+independent_segments \
   -hls_fmp4_init_filename "${slug}.part%v-init.mp4" \
-  -hls_segment_filename "$outdir/${slug}.part%v.m4s" \
+  -hls_segment_filename "$WIN_OUTDIR/${slug}.part%v.m4s" \
   -master_pl_name "${slug}.m3u8" \
   -var_stream_map "$stream_map" \
-  "$outdir/${slug}.part%v.m3u8" | show_ffmpeg_progress "$progress_duration_us"
+  "$WIN_OUTDIR/${slug}.part%v.m3u8" | show_ffmpeg_progress "$progress_duration_us"
 ffmpeg_status=${PIPESTATUS[0]}
 set -e
 if [ "$ffmpeg_status" -ne 0 ]; then
@@ -1431,7 +1443,7 @@ if [ -f "$master" ]; then
     IFS=',' read -r -a hevc_seq_list <<< "${hevc_sequences#,}"
     for seq in "${hevc_seq_list[@]}"; do
       [ -n "$seq" ] || continue
-      part_media="$outdir/${slug}.part$((seq - 1)).m4s"
+      part_media="$WIN_OUTDIR/${slug}.part$((seq - 1)).m4s"
       out_level=$(ffprobe -v error -select_streams v:0 -show_entries stream=level -of default=nw=1:nk=1 "$part_media" 2>/dev/null | head -1)
       out_profile=$(ffprobe -v error -select_streams v:0 -show_entries stream=profile -of default=nw=1:nk=1 "$part_media" 2>/dev/null | head -1)
       [[ "$out_level" =~ ^[0-9]+$ ]] || continue
@@ -1582,9 +1594,9 @@ fi
 
 # A .m3u8 has no thumbnail of its own — Drive generates one for a video file,
 # not for a text playlist — so the library gets a still to put on the card.
-ffmpeg -nostdin -v error -y -ss "${PREP_POSTER_SECONDS:-5}" -i "$input" -frames:v 1 -vf scale=640:-2 \
-  "$outdir/${slug}.poster.jpg" 2>/dev/null ||
-  ffmpeg -nostdin -v error -y -i "$input" -frames:v 1 -vf scale=640:-2 "$outdir/${slug}.poster.jpg"
+ffmpeg -nostdin -v error -y -ss "${PREP_POSTER_SECONDS:-5}" -i "$WIN_INPUT" -frames:v 1 -vf scale=640:-2 \
+  "$WIN_OUTDIR/${slug}.poster.jpg" 2>/dev/null ||
+  ffmpeg -nostdin -v error -y -i "$WIN_INPUT" -frames:v 1 -vf scale=640:-2 "$WIN_OUTDIR/${slug}.poster.jpg"
 
 # A tiny sidecar the library reads for the quality badges. The manifest carries
 # neither HDR nor an AAC track's channel count (5.1 AAC looks like stereo in its
@@ -1636,7 +1648,7 @@ else
   done
 fi
 audio_badge=null
-audio_has_atmos=$(ffprobe -v error -select_streams a -show_entries stream=profile -of default=nw=1:nk=1 "$input" |
+audio_has_atmos=$(ffprobe -v error -select_streams a -show_entries stream=profile -of default=nw=1:nk=1 "$WIN_INPUT" |
   awk 'tolower($0) ~ /atmos/ { print 1; exit }')
 if [ "$keeps_raw_audio" = "1" ] && [ "${audio_has_atmos:-0}" = "1" ]; then audio_badge='"Dolby Atmos"'
 elif [ "$maxch" -ge 8 ]; then audio_badge='"7.1"'
@@ -1651,7 +1663,7 @@ fi
 # `command -v` is not enough: Windows ships a Store stub called python3 that
 # exists but cannot execute, so prove it runs before committing to it.
 if command -v python3 >/dev/null 2>&1 && python3 -c 'pass' >/dev/null 2>&1; then
-  python3 - "$input" "$outdir" "$slug" "$hdr" "$audio_badge" \
+  python3 - "$WIN_INPUT" "$WIN_OUTDIR" "$slug" "$hdr" "$audio_badge" \
     "$copy_video" "$want_raw" "$want_hdr" "$source_video_kept" <<'PYINFO'
 import datetime as dt
 import json
