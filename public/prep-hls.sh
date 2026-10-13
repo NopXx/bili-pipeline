@@ -1565,6 +1565,14 @@ if [ -f "$master" ]; then
     }
   ' "$master" > "$master.tmp" && mv "$master.tmp" "$master"
 
+  # Newer ffmpeg builds write the HEVC CODECS themselves, some with stray
+  # constraint digits (`hvc1.1.4.L150.B01`) that make Chrome reject the whole
+  # string — hls.js then drops the rung silently and the quality menu loses it.
+  if grep -Eq 'hvc1\.[0-9]+\.[0-9]+\.L[0-9]+\.B0[0-9A-Fa-f]+[",]' "$master"; then
+    sed -E -i 's/(hvc1\.[0-9]+\.[0-9]+\.L[0-9]+\.B0)[0-9A-Fa-f]+([",])/\1\2/g' "$master"
+    echo "  master playlist: trimmed stray HEVC constraint digits (B01 -> B0) so browsers accept the rung"
+  fi
+
   if [ "$hevc_sequences" != ',' ]; then
     dv_note=''; [ -n "$dv_supp" ] && dv_note=' + Dolby Vision'
     echo "  master playlist: added CODECS and VIDEO-RANGE=$range$dv_note for Apple"
