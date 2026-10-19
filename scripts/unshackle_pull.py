@@ -52,7 +52,9 @@ def clean_stderr(text):
     """Readable lines from unshackle's stderr: drop ANSI codes, rich box borders and blanks."""
     text = re.sub(r"\x1b\[[0-9;]*m", "", text)
     lines = (line.strip(" │╭╮╰╯─┃") .strip() for line in text.splitlines())
-    return [line for line in lines if line and not set(line) <= set("─━═ ")]
+    # Python warnings (a service's FutureWarning and its echoed source line) are noise that buries the cause.
+    noise = re.compile(r"Warning:|will always return|Use specific|^if |warnings\.warn")
+    return [line for line in lines if line and not set(line) <= set("─━═ ") and not noise.search(line)]
 
 
 def update_state(state_path, **values):
