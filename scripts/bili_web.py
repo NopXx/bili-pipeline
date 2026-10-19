@@ -31,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from urllib.parse import parse_qs, unquote, urlparse
@@ -51,6 +52,8 @@ UNSHACKLE_PULL = os.path.join(HERE, "scripts", "unshackle_pull.py")
 # unshackle (DRM downloader) REST server running next to this one; empty = the Unshackle tab is disabled.
 UNSHACKLE_URL = os.environ.get("UNSHACKLE_URL", "").rstrip("/")
 UNSHACKLE_KEY = os.environ.get("UNSHACKLE_KEY", "")
+# Services verified end to end through unshackle 6.0 (list, download, decrypt, mux); others stay hidden.
+UNSHACKLE_SERVICES = tuple(s for s in os.environ.get("UNSHACKLE_SERVICES", "AMZN,DSNP,HMAX").split(",") if s)
 JOBS_DIR = os.path.realpath(os.environ.get("BILI_JOBS_DIR", os.path.join(HERE, "jobs")))
 DOWNLOADS_DIR = os.path.realpath(os.environ.get("BILI_DOWNLOADS_DIR", "/opt/bili-downloads"))
 TORRENT_DOWNLOADS_DIR = os.path.realpath(os.path.join(DOWNLOADS_DIR, "torrents"))
@@ -838,6 +841,9 @@ class H(BaseHTTPRequestHandler):
         "/api/drive/download": "handle_drive_download",
         "/api/unshackle/services": "handle_unshackle_services",
         "/api/unshackle/download": "handle_unshackle_download",
+        "/api/unshackle/search": "handle_unshackle_search",
+        "/api/unshackle/titles": "handle_unshackle_titles",
+        "/api/unshackle/tracks": "handle_unshackle_tracks",
         "/api/remote/list": "handle_remote_list",
         "/api/remote/queue": "handle_remote_queue",
         "/api/remote/probe": "handle_remote_probe",
@@ -1016,18 +1022,80 @@ class H(BaseHTTPRequestHandler):
                 services = json.load(response).get("services") or []
         except (OSError, ValueError) as exc:
             return self._send(502, json.dumps({"error": f"unshackle unreachable: {exc}"}))
-        self._send(200, json.dumps({"enabled": True, "services": sorted(s["tag"] for s in services if s.get("tag"))}))
+        available = {s.get("tag"): s for s in services}
+        tested = [tag for tag in UNSHACKLE_SERVICES if tag in available]
+        self._send(200, json.dumps({"enabled": True, "services": tested,
+                                    "searchable": [tag for tag in tested if available[tag].get("has_search")]}))
+
+    def _unshackle(self, path, request):
+        """POST to unshackle and return its JSON; an unshackle error becomes a 4xx/5xx for the browser."""
+        if not UNSHACKLE_URL:
+            raise LookupError("unshackle is not running (UNSHACKLE_URL is not set)")
+        http = urllib.request.Request(UNSHACKLE_URL + path, data=json.dumps(request).encode(),
+                                      headers={"Content-Type": "application/json", "X-Secret-Key": UNSHACKLE_KEY})
+        try:
+            with urllib.request.urlopen(http, timeout=600) as response:  # list-tracks can take a minute
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            try:
+                detail = json.loads(detail).get("message") or detail
+            except ValueError:
+                pass
+            raise LookupError(detail[:600]) from None
+
+    def _unshackle_lookup(self, body, path, extra):
+        service = str(body.get("service") or "").strip()
+        if service not in UNSHACKLE_SERVICES:
+            return self._send(400, json.dumps({"error": "unsupported service"}))
+        request = {"service": service, **extra}
+        proxy = str(body.get("proxy") or "").strip()
+        if proxy:
+            if not re.fullmatch(r"(socks5h?|https?)://\S+", proxy):
+                return self._send(400, json.dumps({"error": "proxy must be a socks5:// or http(s):// URL"}))
+            request["proxy"] = proxy
+        try:
+            result = self._unshackle(path, request)
+        except (LookupError, OSError) as exc:
+            return self._send(502, json.dumps({"error": str(exc)}))
+        self._send(200, json.dumps(result))
+
+    def handle_unshackle_search(self, body):
+        query = str(body.get("query") or "").strip()
+        if not query or len(query) > 200:
+            return self._send(400, json.dumps({"error": "enter a search term"}))
+        return self._unshackle_lookup(body, "/api/search", {"query": query})
+
+    def handle_unshackle_titles(self, body):
+        title = str(body.get("title") or "").strip()
+        if not title or len(title) > 2048:
+            return self._send(400, json.dumps({"error": "enter a title URL or ID"}))
+        return self._unshackle_lookup(body, "/api/list-titles", {"title_id": title})
+
+    def handle_unshackle_tracks(self, body):
+        title = str(body.get("title") or "").strip()
+        if not title or len(title) > 2048:
+            return self._send(400, json.dumps({"error": "enter a title URL or ID"}))
+        extra = {"title_id": title}
+        if re.fullmatch(r"S\d{1,3}E\d{1,4}", str(body.get("wanted") or "")):
+            extra["wanted"] = body["wanted"]
+        ranges = [r for r in body.get("range") or [] if r in ("SDR", "HDR10", "HDR10P", "DV", "HLG", "HYBRID")]
+        if ranges:  # services fetch one range per manifest (AMZN), so ask for the one the user wants
+            extra["range"] = ranges
+        return self._unshackle_lookup(body, "/api/list-tracks", extra)
 
     def handle_unshackle_download(self, body):
         if not UNSHACKLE_URL:
             return self._send(400, json.dumps({"error": "unshackle is not running (UNSHACKLE_URL is not set)"}))
         service = str(body.get("service") or "").strip()
         title = str(body.get("title") or "").strip()
-        if not re.fullmatch(r"[A-Za-z0-9_]{2,16}", service) or not title or len(title) > 2048:
+        if service not in UNSHACKLE_SERVICES or not title or len(title) > 2048:
             return self._send(400, json.dumps({"error": "pick a service and enter a title URL or ID"}))
 
         def words(key):
-            return [w for w in re.split(r"[\s,]+", str(body.get(key) or "").strip()) if w]
+            value = body.get(key) or ""
+            value = " ".join(map(str, value)) if isinstance(value, list) else str(value)
+            return [w for w in re.split(r"[\s,]+", value.strip()) if w]
 
         request = {"service": service, "title_id": title}
         quality = str(body.get("quality") or "").strip()
@@ -1037,6 +1105,11 @@ class H(BaseHTTPRequestHandler):
             request["quality"] = [int(quality)]
         if words("range"):
             request["range"] = words("range")
+        vbitrate = str(body.get("vbitrate") or "").strip()
+        if vbitrate:  # pins the exact rung picked from the track list (nearest match server side)
+            if not vbitrate.isdigit():
+                return self._send(400, json.dumps({"error": "vbitrate must be kbps"}))
+            request["vbitrate"] = int(vbitrate)
         if str(body.get("vcodec") or "").strip():
             request["vcodec"] = str(body["vcodec"]).strip()
         # No audio pick would mean unshackle's default (every dub), so require one; blank subs = none.

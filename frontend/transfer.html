@@ -89,35 +89,79 @@
         </div>
 
         <div v-if="source === 'unshackle'" class="form">
-          <p v-if="unshackle.enabled === false" class="hint">ยังไม่ได้เปิด unshackle ใน notebook — รันเซลล์ unshackle แล้วรันเซลล์ server ใหม่</p>
+          <p v-if="un.enabled === false" class="hint">ยังไม่ได้เปิด unshackle ใน notebook — รันเซลล์ unshackle แล้วรันเซลล์ server ใหม่</p>
           <div class="options">
             <label class="field"><span>Service</span>
-              <select v-model="unshackle.options.service"><option v-for="tag in unshackle.services" :key="tag" :value="tag">{{tag}}</option></select>
+              <select v-model="un.options.service" @change="unReset()"><option v-for="tag in un.services" :key="tag" :value="tag">{{tag}}</option></select>
             </label>
-            <label class="field"><span>ความละเอียด</span>
-              <select v-model="unshackle.options.quality"><option value="">ดีที่สุด</option><option v-for="q in ['2160','1440','1080','720','480']" :key="q" :value="q">{{q}}p</option></select>
-            </label>
-            <label class="field"><span>Range</span>
-              <select v-model="unshackle.options.range"><option v-for="r in ['SDR','HDR10','DV','HYBRID']" :key="r" :value="r">{{r}}</option></select>
-            </label>
+            <label class="field"><span>Proxy</span><input v-model="un.options.proxy" placeholder="socks5://user:pass@host:port"></label>
           </div>
           <label class="field">
-            <span>URL หรือ Title ID</span>
-            <input v-model="unshackle.title" placeholder="https://www.primevideo.com/detail/… หรือ entity-…" @keyup.enter="submitUnshackle">
+            <span>{{unCanSearch ? 'ค้นหา หรือวาง URL / Title ID' : 'URL หรือ Title ID'}}</span>
+            <input v-model="un.input" placeholder="https://… หรือชื่อเรื่อง" @keyup.enter="unGo">
           </label>
-          <div class="options">
-            <label class="field"><span>เสียง (ภาษา)</span><input v-model="unshackle.options.a_lang" placeholder="en, orig"></label>
-            <label class="field"><span>ซับ (เว้นว่าง = ไม่เอา)</span><input v-model="unshackle.options.s_lang" placeholder="en, th"></label>
-            <label class="field"><span>ตอน (ซีรีส์)</span><input v-model="unshackle.wanted" placeholder="S01E01, S01"></label>
-          </div>
-          <label class="field">
-            <span>Proxy</span>
-            <input v-model="unshackle.options.proxy" placeholder="socks5://user:pass@host:port">
-          </label>
-          <p class="hint">บน Kaggle ทุก service ต้องผ่าน proxy (IP ของ Kaggle ถูกบล็อก) · ไฟล์ลงแท็บไฟล์ แล้วอัปโหลดเอง</p>
-          <button class="wide" @click="submitUnshackle" :disabled="!unshackle.title.trim() || !unshackle.options.service || unshackle.submitting">
-            <span class="spinner" v-if="unshackle.submitting"></span>เพิ่มเข้าคิว
+          <button class="wide" @click="unGo" :disabled="!un.input.trim() || !un.options.service || !!un.busy">
+            <span class="spinner" v-if="un.busy === 'search' || un.busy === 'open'"></span>{{unLooksLikeId ? 'เปิด' : 'ค้นหา'}}
           </button>
+
+          <div v-if="un.results.length && !un.titles.length" class="picker">
+            <div class="picker-head"><span>ผลการค้นหา</span><span class="muted">{{un.results.length}} รายการ</span></div>
+            <div class="picker-list">
+              <label class="row" v-for="r in un.results" :key="r.id" @click.prevent="unOpen(r.id)">
+                <span class="name" :title="r.description">{{r.title}}</span><span class="size">{{r.label}}</span>
+              </label>
+            </div>
+          </div>
+
+          <div v-if="un.titles.length" class="picker">
+            <div class="picker-head">
+              <label class="check" v-if="unEpisodic"><input type="checkbox" :checked="un.selected.length === un.titles.length" :indeterminate.prop="un.selected.length > 0 && un.selected.length < un.titles.length" @change="un.selected = $event.target.checked ? un.titles.map(unCode) : []"> เลือกทั้งหมด</label>
+              <span v-else class="name">{{un.titles[0].name}} <small v-if="un.titles[0].year">({{un.titles[0].year}})</small></span>
+              <span class="muted" v-if="unEpisodic">{{un.titles[0].series_title || un.titles[0].name}} · {{un.selected.length}} / {{un.titles.length}} ตอน</span>
+            </div>
+            <div class="picker-list" v-if="unEpisodic">
+              <label class="row" v-for="t in un.titles" :key="t.id">
+                <input type="checkbox" :value="unCode(t)" v-model="un.selected">
+                <span class="name"><small>{{unCode(t)}}</small> {{t.name}}</span>
+              </label>
+            </div>
+            <div class="options">
+              <label class="field"><span>Range</span>
+                <select v-model="un.options.range"><option v-for="r in ['SDR','HDR10','DV']" :key="r" :value="r">{{r}}</option></select>
+              </label>
+            </div>
+            <button class="wide" @click="unLoadTracks" :disabled="!!un.busy || (unEpisodic && !un.selected.length)">
+              <span class="spinner" v-if="un.busy === 'tracks'"></span>{{un.busy === 'tracks' ? 'กำลังโหลด tracks (อาจใช้เวลาเป็นนาที)…' : 'โหลด tracks'}}
+            </button>
+          </div>
+
+          <div v-if="un.tracks" class="picker">
+            <div class="picker-head"><span>วิดีโอ</span><span class="muted">{{un.tracks.video.length}} streams</span></div>
+            <div class="picker-list">
+              <label class="row" v-for="v in unVideos" :key="v.id">
+                <input type="radio" :value="v.id" v-model="un.video">
+                <span class="name">{{v.width}}×{{v.height}} · {{v.range}} · {{v.codec_display || v.codec}}</span>
+                <span class="size">{{(v.bitrate / 1000).toFixed(2)}} Mbps</span>
+              </label>
+            </div>
+            <div class="picker-head"><span>เสียง</span><span class="muted">{{un.audio.length}} ภาษา</span></div>
+            <div class="picker-list">
+              <label class="row" v-for="lang in unAudioLangs" :key="lang.code">
+                <input type="checkbox" :value="lang.code" v-model="un.audio">
+                <span class="name">{{lang.code}} <small v-if="lang.orig">orig</small></span><span class="size">{{lang.detail}}</span>
+              </label>
+            </div>
+            <div class="picker-head"><span>ซับ</span><span class="muted">{{un.subs.length ? un.subs.length + ' ภาษา' : 'ไม่เอาซับ'}}</span></div>
+            <div class="picker-list">
+              <label class="row" v-for="lang in unSubLangs" :key="lang">
+                <input type="checkbox" :value="lang" v-model="un.subs"><span class="name">{{lang}}</span>
+              </label>
+            </div>
+            <p class="hint">ไฟล์ลงแท็บไฟล์ แล้วอัปโหลดเอง · บน Kaggle ทุก service ต้องใส่ Proxy</p>
+            <button class="wide" @click="unSubmit" :disabled="!un.video || !un.audio.length || !!un.busy">
+              <span class="spinner" v-if="un.busy === 'submit'"></span>ดาวน์โหลด{{unEpisodic ? ' ' + un.selected.length + ' ตอน' : ''}}
+            </button>
+          </div>
         </div>
 
         <div v-if="source === 'bili'" class="form">

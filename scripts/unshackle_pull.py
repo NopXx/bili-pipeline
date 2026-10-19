@@ -4,7 +4,9 @@
 Usage: unshackle_pull.py CONFIG_JSON STATE_JSON
 
 CONFIG_JSON holds the unshackle /api/download body (service, title_id, quality, range, a_lang, s_lang, ...)
-plus "destination", the folder under the downloads dir the file lands in (so it shows in the Files tab).
+plus "destination": unshackle's own downloads directory, which the notebook points inside the web UI's
+downloads dir so the file shows in the Files tab. (unshackle 6.0 rejects an output_dir outside its
+downloads directory, so the folder is set in its config, not per job.)
 unshackle serve must run on UNSHACKLE_URL (default http://127.0.0.1:8786) with key UNSHACKLE_KEY.
 SIGTERM (the web UI's cancel) cancels the unshackle job too.
 """
@@ -63,8 +65,7 @@ def main(config_path, state_path):
     with open(config_path, encoding="utf-8") as handle:
         config = json.load(handle)
     destination = config.pop("destination")
-    os.makedirs(destination, exist_ok=True)
-    body = {**config, "output_dir": destination}
+    body = config
 
     job = call("/api/download", body)["job_id"]
     log(f"unshackle job {job}: {body['service']} {body['title_id']}")
@@ -112,20 +113,14 @@ def main(config_path, state_path):
         update_state(state_path, error=str(error)[:500])
         log(f"failed: {error}")
         return 1
-    # unshackle reports paths relative to its own working dir; resolve them under the destination.
-    files = []
-    for path in data.get("output_files") or []:
-        for candidate in (path, os.path.join(destination, os.path.basename(path))):
-            if os.path.isfile(candidate):
-                files.append(os.path.realpath(candidate))
-                break
-        else:
-            files.extend(
-                os.path.realpath(os.path.join(root, name))
-                for root, _, names in os.walk(destination)
-                for name in names
-                if name == os.path.basename(path)
-            )
+    # unshackle reports paths relative to its own working dir; find them by name under the destination.
+    names = {os.path.basename(path) for path in data.get("output_files") or []}
+    files = sorted(
+        os.path.join(root, name)
+        for root, _, found in os.walk(destination, followlinks=True)
+        for name in found
+        if name in names
+    )
     update_state(state_path, files=files, progress=100)
     log("done: " + ", ".join(files))
     return 0
