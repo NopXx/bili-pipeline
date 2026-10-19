@@ -44,7 +44,8 @@ class FakeUnshackle:
                 if fake.polls < 2:
                     return self._json(200, {"status": "downloading", "progress": 42.5, "phase": "downloading video", "speed": "9 MB/s"})
                 if fail:
-                    return self._json(200, {"status": "failed", "error_message": "There's no 2160p Video Track..."})
+                    return self._json(200, {"status": "failed", "error_message": "Download failed with exit code 1",
+                                            "worker_stderr": "\x1b[31m╭── Traceback ──╮\x1b[0m\n│ boom │\nThere's no 2160p Video Track...\n"})
                 Path(destination, "Film.2160p.mkv").write_bytes(b"x")
                 return self._json(200, {"status": "completed", "progress": 100, "output_files": ["Downloads/Film.2160p.mkv"]})
 

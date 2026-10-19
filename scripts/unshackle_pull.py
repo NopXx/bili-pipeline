@@ -13,6 +13,7 @@ SIGTERM (the web UI's cancel) cancels the unshackle job too.
 
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -45,6 +46,13 @@ def call(path, body=None, method=None):
             pass
         raise RuntimeError(f"unshackle {exc.code}: {detail[:400]}") from None
     return json.loads(raw) if raw else {}
+
+
+def clean_stderr(text):
+    """Readable lines from unshackle's stderr: drop ANSI codes, rich box borders and blanks."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    lines = (line.strip(" │╭╮╰╯─┃") .strip() for line in text.splitlines())
+    return [line for line in lines if line and not set(line) <= set("─━═ ")]
 
 
 def update_state(state_path, **values):
@@ -109,7 +117,12 @@ def main(config_path, state_path):
         time.sleep(POLL_SECONDS)
 
     if status != "completed":
-        error = data.get("error_message") or data.get("error_details") or status
+        # error_message is generic ("Download failed with exit code 1"); the cause is in the
+        # worker's stderr (e.g. "There's no 432p Video Track..."). Log its tail, surface the last line.
+        stderr = clean_stderr(data.get("worker_stderr") or "")
+        for line in stderr[-15:]:
+            log(f"  unshackle: {line}")
+        error = (stderr[-1] if stderr else "") or data.get("error_details") or data.get("error_message") or status
         update_state(state_path, error=str(error)[:500])
         log(f"failed: {error}")
         return 1
