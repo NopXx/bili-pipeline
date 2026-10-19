@@ -195,7 +195,7 @@
               <span class="muted">{{unVideos.length}} / {{un.tracks.video.length}} streams</span>
             </div>
             <h3 class="section-title">วิดีโอ</h3>
-            <div class="files">
+            <div class="files tracks-list tall">
               <label class="row" v-for="v in unVideos" :key="v.id">
                 <input type="radio" :value="v.id" v-model="un.video">
                 <span class="name">{{v.width}}×{{v.height}} · {{v.range}} · {{v.codec_display || v.codec}}<small v-if="v.fps"> · {{Math.round(v.fps * 100) / 100}} fps</small></span>
@@ -203,18 +203,33 @@
               </label>
               <div class="empty" v-if="!unVideos.length">ไม่มี stream ที่ตรงกับตัวกรอง</div>
             </div>
-            <h3 class="section-title">เสียง <small class="muted">{{un.audio.length}} ภาษา</small></h3>
-            <div class="files">
-              <label class="row" v-for="lang in unAudioLangs" :key="lang.code">
+            <h3 class="section-title">เสียง <small class="muted">เลือก {{un.audio.length}} ภาษา · {{un.audio.join(', ')}}</small></h3>
+            <div class="toolbar">
+              <div class="segmented small">
+                <button v-for="q in [['rec','แนะนำ'],['all','ทั้งหมด'],['th','ไทย'],['en','อังกฤษ'],['atmos','Atmos']]" :key="q[0]" :class="{on: un.audioQuick === q[0]}" @click="un.audioQuick = q[0]">{{q[1]}}</button>
+              </div>
+              <input v-model="un.audioSearch" class="filter grow" placeholder="ค้นหาภาษา / codec…">
+            </div>
+            <div class="files tracks-list">
+              <label class="row" v-for="lang in unAudioRows" :key="lang.code">
                 <input type="checkbox" :value="lang.code" v-model="un.audio">
                 <span class="name">{{lang.code}} <small v-if="lang.orig">orig</small></span><span class="size">{{lang.detail}}</span>
               </label>
+              <div class="empty" v-if="!unAudioRows.length">ไม่มีเสียงที่ตรงกับตัวกรอง</div>
             </div>
-            <h3 class="section-title">ซับ <small class="muted">{{un.subs.length ? un.subs.length + ' ภาษา' : 'ไม่เอาซับ'}}</small></h3>
-            <div class="files">
-              <label class="row" v-for="lang in unSubLangs" :key="lang">
-                <input type="checkbox" :value="lang" v-model="un.subs"><span class="name">{{lang}}</span>
+            <h3 class="section-title">ซับ <small class="muted">{{un.subs.length ? 'เลือก ' + un.subs.length + ' ภาษา · ' + un.subs.join(', ') : 'ไม่เอาซับ'}}</small></h3>
+            <div class="toolbar">
+              <div class="segmented small">
+                <button v-for="q in [['rec','แนะนำ'],['all','ทั้งหมด'],['th','ไทย'],['en','อังกฤษ'],['forced','Forced'],['sdh','SDH / CC']]" :key="q[0]" :class="{on: un.subQuick === q[0]}" @click="un.subQuick = q[0]">{{q[1]}}</button>
+              </div>
+              <input v-model="un.subSearch" class="filter grow" placeholder="ค้นหาภาษา…">
+            </div>
+            <div class="files tracks-list">
+              <label class="row" v-for="lang in unSubRows" :key="lang.code">
+                <input type="checkbox" :value="lang.code" v-model="un.subs">
+                <span class="name">{{lang.code}}</span><span class="size">{{lang.detail}}</span>
               </label>
+              <div class="empty" v-if="!unSubRows.length">ไม่มีซับที่ตรงกับตัวกรอง</div>
             </div>
             <div class="selection">
               <span>{{unPickLabel}}</span>

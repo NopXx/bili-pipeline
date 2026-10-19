@@ -17,6 +17,7 @@ createApp({
     // Same flow as unshackle-ui: search/open -> episodes -> tracks -> pick -> queue.
     un: { enabled: null, services: [], searchable: [], input: '', busy: '', results: [], titleId: '',
       titles: [], selected: [], tracks: null, video: '', audio: [], subs: [], filter: { height: '', range: '', codec: '' },
+      audioQuick: 'rec', subQuick: 'rec', audioSearch: '', subSearch: '',
       options: { ...UNSHACKLE_DEFAULTS, ...Shared.load('unshackle-options', {}) } },
     unLoadSeq: 0,
     BILI_QUALITIES: Shared.BILI_QUALITIES, BILI_CODECS: Shared.BILI_CODECS, BILI_AUDIO: Shared.BILI_AUDIO,
@@ -104,7 +105,37 @@ createApp({
       return [...langs.values()].filter(l => l.code).map(l => ({ ...l, detail: [...l.kinds].slice(0, 3).join(' · ') }))
         .sort((a, b) => (b.orig - a.orig) || a.code.localeCompare(b.code))
     },
-    unSubLangs() { return [...new Set((this.un.tracks?.subtitles || []).map(s => s.language).filter(Boolean))].sort() },
+    unSubLangs() {
+      const langs = new Map()
+      for (const t of this.un.tracks?.subtitles || []) {
+        if (!t.language) continue
+        const lang = langs.get(t.language) || { code: t.language, forced: false, sdh: false, kinds: new Set() }
+        lang.forced ||= !!t.forced
+        lang.sdh ||= !!(t.sdh || t.cc)
+        lang.kinds.add(t.forced ? 'Forced' : (t.sdh || t.cc) ? 'SDH' : 'ปกติ')
+        langs.set(t.language, lang)
+      }
+      return [...langs.values()].map(l => ({ ...l, detail: [...l.kinds].join(' · ') })).sort((a, b) => a.code.localeCompare(b.code))
+    },
+    // Same filters as unshackle-ui: "แนะนำ" = original + English + Thai (+ whatever is already picked).
+    unRecommended() {
+      const orig = this.unAudioLangs.filter(l => l.orig).map(l => l.code.split('-')[0])
+      return code => ['en', 'th', ...orig].includes(code.split('-')[0])
+    },
+    unAudioRows() {
+      const q = this.un.audioSearch.trim().toLowerCase(), base = c => c.split('-')[0]
+      return this.unAudioLangs.filter(l =>
+        (this.un.audioQuick !== 'rec' || l.orig || this.un.audio.includes(l.code) || this.unRecommended(l.code)) &&
+        (this.un.audioQuick !== 'th' || base(l.code) === 'th') && (this.un.audioQuick !== 'en' || base(l.code) === 'en') &&
+        (this.un.audioQuick !== 'atmos' || l.detail.includes('Atmos')) && (!q || `${l.code} ${l.detail}`.toLowerCase().includes(q)))
+    },
+    unSubRows() {
+      const q = this.un.subSearch.trim().toLowerCase(), base = c => c.split('-')[0]
+      return this.unSubLangs.filter(l =>
+        (this.un.subQuick !== 'rec' || this.un.subs.includes(l.code) || this.unRecommended(l.code)) &&
+        (this.un.subQuick !== 'th' || base(l.code) === 'th') && (this.un.subQuick !== 'en' || base(l.code) === 'en') &&
+        (this.un.subQuick !== 'forced' || l.forced) && (this.un.subQuick !== 'sdh' || l.sdh) && (!q || l.code.toLowerCase().includes(q)))
+    },
   },
   watch: {
     view(value) { if (value === 'files') this.loadFiles() },
