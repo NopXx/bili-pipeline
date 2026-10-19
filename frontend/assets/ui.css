@@ -97,8 +97,8 @@ code{font-family:var(--mono);font-size:.92em;background:var(--card2);padding:1px
 .selection span{flex:1;font-size:13px}
 .section-title{font-size:14px;margin:14px 0 6px;display:flex;gap:8px;align-items:baseline}
 /* Track picker cards: fixed height, scroll inside, so video/audio/subs all stay in view. */
-.tracks-list{height:220px;overflow:auto}
-.tracks-list.tall{height:340px}
+.files.tracks-list{height:220px;overflow:auto}  /* .files sets overflow:hidden later in this file */
+.files.tracks-list.tall{height:340px}
 .uploads{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
 .upload-row{display:flex;align-items:center;gap:10px;font-size:13px}
 .upload-row .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
