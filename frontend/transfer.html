@@ -213,11 +213,19 @@
             <div class="files tracks-list">
               <label class="row" v-for="lang in unAudioRows" :key="lang.code">
                 <input type="checkbox" :value="lang.code" v-model="un.audio">
-                <span class="name">{{lang.code}} <small v-if="lang.orig">orig</small></span><span class="size">{{lang.detail}}</span>
+                <span class="name">{{lang.code}} <span class="tag" v-if="lang.orig">orig</span> <span class="tag warn" v-if="lang.atmos">Atmos</span></span><span class="size">{{lang.detail}}</span>
               </label>
               <div class="empty" v-if="!unAudioRows.length">ไม่มีเสียงที่ตรงกับตัวกรอง</div>
             </div>
-            <h3 class="section-title">ซับ <small class="muted">{{un.subs.length ? 'เลือก ' + un.subs.length + ' ภาษา · ' + un.subs.join(', ') : 'ไม่เอาซับ'}}</small></h3>
+            <div class="audio-quality" v-if="unAudioLadder.length > 1">
+              <small class="muted">QUALITY · {{unAudioPicked ? unAudioLabel(unAudioPicked, true) : 'best available'}}</small>
+              <div class="qchips">
+                <button class="qchip" :class="{on: !un.audioPick}" @click="un.audioPick = ''">Auto</button>
+                <button class="qchip" v-for="a in unAudioLadder" :key="unAudioKey(a)" :class="{on: un.audioPick === unAudioKey(a)}"
+                  @click="un.audioPick = un.audioPick === unAudioKey(a) ? '' : unAudioKey(a)">{{unAudioLabel(a, true)}} <span class="tag warn" v-if="a.atmos">Atmos</span></button>
+              </div>
+            </div>
+            <h3 class="section-title">ซับ <small class="muted">{{un.subs.length ? 'เลือก ' + un.subs.length + ' ภาษา · ' + un.subs.join(', ') + ' · บันทึกเป็น SRT' : 'ไม่เอาซับ'}}</small></h3>
             <div class="toolbar">
               <div class="segmented small">
                 <button v-for="q in [['rec','แนะนำ'],['all','ทั้งหมด'],['th','ไทย'],['en','อังกฤษ'],['forced','Forced'],['sdh','SDH / CC']]" :key="q[0]" :class="{on: un.subQuick === q[0]}" @click="un.subQuick = q[0]">{{q[1]}}</button>

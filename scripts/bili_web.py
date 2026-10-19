@@ -1110,6 +1110,18 @@ class H(BaseHTTPRequestHandler):
             if not vbitrate.isdigit():
                 return self._send(400, json.dumps({"error": "vbitrate must be kbps"}))
             request["vbitrate"] = int(vbitrate)
+        acodec = str(body.get("acodec") or "").strip()
+        if acodec:  # an audio quality variant picked in the track list, like unshackle-ui
+            if not re.fullmatch(r"[A-Za-z0-9_.+-]{2,16}", acodec):
+                return self._send(400, json.dumps({"error": "invalid acodec"}))
+            request["acodec"] = acodec
+            try:
+                if str(body.get("channels") or "").strip():
+                    request["channels"] = float(body["channels"])
+                if str(body.get("abitrate") or "").strip():
+                    request["abitrate"] = int(body["abitrate"])
+            except (TypeError, ValueError):
+                return self._send(400, json.dumps({"error": "channels / abitrate must be numbers"}))
         if str(body.get("vcodec") or "").strip():
             request["vcodec"] = str(body["vcodec"]).strip()
         # No audio pick would mean unshackle's default (every dub), so require one; blank subs = none.

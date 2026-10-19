@@ -99,6 +99,12 @@ code{font-family:var(--mono);font-size:.92em;background:var(--card2);padding:1px
 /* Track picker cards: fixed height, scroll inside, so video/audio/subs all stay in view. */
 .files.tracks-list{height:220px;overflow:auto}  /* .files sets overflow:hidden later in this file */
 .files.tracks-list.tall{height:340px}
+.tag{font-size:11px;border-radius:5px;padding:0 5px;background:#4f8cff22;color:#8fb4ff}
+.tag.warn{background:#f5a62322;color:#f5c06a}
+.audio-quality{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.qchips{display:flex;flex-wrap:wrap;gap:6px}
+.qchip{background:transparent;border:1px solid var(--line);border-radius:8px;padding:5px 9px;font-size:12px;box-shadow:none;color:var(--text);font-weight:500}
+.qchip.on{border-color:var(--blue);background:#4f8cff1a}
 .uploads{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
 .upload-row{display:flex;align-items:center;gap:10px;font-size:13px}
 .upload-row .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

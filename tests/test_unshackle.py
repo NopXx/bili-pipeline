@@ -111,13 +111,15 @@ class UnshackleRouteTests(unittest.TestCase):
                 self.assertEqual(no_audio.exception.code, 400)
                 job = post("/api/unshackle/download", {"service": "DSNP", "title": "entity-1", "quality": "2160", "vbitrate": "16932",
                                                        "range": ["DV"], "a_lang": ["en", "orig"], "s_lang": [],
-                                                       "wanted": ["S01E01", "S01E02"], "proxy": "socks5://u:p@h:1"})["job"]
+                                                       "wanted": ["S01E01", "S01E02"], "proxy": "socks5://u:p@h:1",
+                                                       "acodec": "EC3", "channels": "5.1", "abitrate": "768"})["job"]
                 item = web.jobs[job]
                 self.assertEqual((item["lane"], item["command"][1]), ("download", web.UNSHACKLE_PULL))
                 self.assertEqual(item["env_overrides"], {})  # the key must not be persisted with the job
                 config = json.loads(Path(item["command"][2]).read_text())
                 self.assertEqual(config, {"service": "DSNP", "title_id": "entity-1", "quality": [2160], "range": ["DV"],
-                                          "vbitrate": 16932, "a_lang": ["en", "orig"], "no_subs": True,
+                                          "vbitrate": 16932, "acodec": "EC3", "channels": 5.1, "abitrate": 768,
+                                          "a_lang": ["en", "orig"], "no_subs": True,
                                           "wanted": ["S01E01", "S01E02"], "proxy": "socks5://u:p@h:1",
                                           "destination": os.path.join(web.DOWNLOADS_DIR, "unshackle")})
                 # A queued job may wait paused; a running one cannot (stopping the worker would not stop unshackle).

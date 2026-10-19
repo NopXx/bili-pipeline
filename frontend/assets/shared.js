@@ -95,7 +95,15 @@ const Shared = (() => {
     const d = job.details || {}
     const facts = []
     if (job.status === 'running' || job.status === 'paused') {
-      if (d.done && d.total) facts.push(`${d.done} / ${d.total}`)
+      // unshackle reports what it is on: "downloading video 2160p DV", "downloading audio en 5.1",
+      // "downloading subtitle th", "muxing 41%".
+      if (job.kind === 'unshackle' && d.phase) {
+        const phase = String(d.phase)
+        // A bare "downloading" is unshackle signing in and fetching the manifest, before any track.
+        facts.push(phase === 'downloading' || phase === 'queued' ? 'กำลังเตรียม (login / manifest)'
+          : phase.replace(/^downloading /, 'กำลังโหลด ').replace(/^muxing/, 'กำลัง mux').replace(/ 6\.0$/, ' 5.1').replace(/ 8\.0$/, ' 7.1'))
+      }
+      if (d.done && d.total) facts.push(`${job.kind === 'unshackle' ? 'track ' : ''}${d.done} / ${d.total}`)
       else if (d.downloaded_bytes) facts.push(`${size(d.downloaded_bytes)} / ${d.total_bytes ? size(d.total_bytes) : '?'}`)
       if (job.status === 'running') {
         const arrow = laneOf(job) === 'upload' ? '↑' : '↓'
