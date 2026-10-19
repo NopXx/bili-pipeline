@@ -32,6 +32,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 from urllib.parse import parse_qs, unquote, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from job_queue import JobQueue
@@ -46,6 +47,10 @@ TORRENT_DOWNLOAD = os.path.join(HERE, "scripts", "torrent_download.py")
 REMOTE_FETCH = os.path.join(HERE, "scripts", "remote_fetch.py")
 DRIVE_FILES = os.path.join(HERE, "scripts", "drive_files.mjs")
 DRIVE_DOWNLOAD = os.path.join(HERE, "scripts", "drive_download.mjs")
+UNSHACKLE_PULL = os.path.join(HERE, "scripts", "unshackle_pull.py")
+# unshackle (DRM downloader) REST server running next to this one; empty = the Unshackle tab is disabled.
+UNSHACKLE_URL = os.environ.get("UNSHACKLE_URL", "").rstrip("/")
+UNSHACKLE_KEY = os.environ.get("UNSHACKLE_KEY", "")
 JOBS_DIR = os.path.realpath(os.environ.get("BILI_JOBS_DIR", os.path.join(HERE, "jobs")))
 DOWNLOADS_DIR = os.path.realpath(os.environ.get("BILI_DOWNLOADS_DIR", "/opt/bili-downloads"))
 TORRENT_DOWNLOADS_DIR = os.path.realpath(os.path.join(DOWNLOADS_DIR, "torrents"))
@@ -831,6 +836,8 @@ class H(BaseHTTPRequestHandler):
         "/api/torrent": "handle_torrent",
         "/api/torrent/inspect": "handle_torrent_inspect",
         "/api/drive/download": "handle_drive_download",
+        "/api/unshackle/services": "handle_unshackle_services",
+        "/api/unshackle/download": "handle_unshackle_download",
         "/api/remote/list": "handle_remote_list",
         "/api/remote/queue": "handle_remote_queue",
         "/api/remote/probe": "handle_remote_probe",
@@ -997,6 +1004,66 @@ class H(BaseHTTPRequestHandler):
             json.dump({"job": job, "kind": "drive_download", "source": source, "resource_key": resource_key,
                        "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}, handle)
         queue.submit(job, "download", ["node", DRIVE_DOWNLOAD, config_path, state_path])
+        self._send(200, json.dumps({"job": job}))
+
+    def handle_unshackle_services(self, body):
+        del body
+        if not UNSHACKLE_URL:
+            return self._send(200, json.dumps({"enabled": False, "services": []}))
+        request = urllib.request.Request(UNSHACKLE_URL + "/api/services", headers={"X-Secret-Key": UNSHACKLE_KEY})
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                services = json.load(response).get("services") or []
+        except (OSError, ValueError) as exc:
+            return self._send(502, json.dumps({"error": f"unshackle unreachable: {exc}"}))
+        self._send(200, json.dumps({"enabled": True, "services": sorted(s["tag"] for s in services if s.get("tag"))}))
+
+    def handle_unshackle_download(self, body):
+        if not UNSHACKLE_URL:
+            return self._send(400, json.dumps({"error": "unshackle is not running (UNSHACKLE_URL is not set)"}))
+        service = str(body.get("service") or "").strip()
+        title = str(body.get("title") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]{2,16}", service) or not title or len(title) > 2048:
+            return self._send(400, json.dumps({"error": "pick a service and enter a title URL or ID"}))
+
+        def words(key):
+            return [w for w in re.split(r"[\s,]+", str(body.get(key) or "").strip()) if w]
+
+        request = {"service": service, "title_id": title}
+        quality = str(body.get("quality") or "").strip()
+        if quality:
+            if not quality.isdigit():
+                return self._send(400, json.dumps({"error": "quality must be a height such as 2160"}))
+            request["quality"] = [int(quality)]
+        if words("range"):
+            request["range"] = words("range")
+        if str(body.get("vcodec") or "").strip():
+            request["vcodec"] = str(body["vcodec"]).strip()
+        # No audio pick would mean unshackle's default (every dub), so require one; blank subs = none.
+        audio = words("a_lang")
+        if not audio:
+            return self._send(400, json.dumps({"error": "enter at least one audio language (e.g. en or orig)"}))
+        request["a_lang"] = audio
+        subs = words("s_lang")
+        request.update({"s_lang": subs, "sub_format": "SRT"} if subs else {"no_subs": True})
+        if words("wanted"):
+            request["wanted"] = words("wanted")
+        proxy = str(body.get("proxy") or "").strip()
+        if proxy:
+            if not re.fullmatch(r"(socks5h?|https?)://\S+", proxy):
+                return self._send(400, json.dumps({"error": "proxy must be a socks5:// or http(s):// URL"}))
+            request["proxy"] = proxy
+
+        job = secrets.token_hex(8)
+        config_path = os.path.join(JOBS_DIR, job + ".config.json")
+        state_path = os.path.join(JOBS_DIR, job + ".json")
+        with open(config_path, "w", encoding="utf-8") as handle:
+            json.dump({**request, "destination": os.path.join(DOWNLOADS_DIR, "unshackle")}, handle)
+        with open(os.path.join(JOBS_DIR, job + ".meta.json"), "w", encoding="utf-8") as handle:
+            json.dump({"job": job, "kind": "unshackle", "body": body, "source": f"{service} {title}",
+                       "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}, handle)
+        # The worker inherits UNSHACKLE_URL/KEY from this process; env_overrides would persist the key to disk.
+        queue.submit(job, "download", [sys.executable, UNSHACKLE_PULL, config_path, state_path])
         self._send(200, json.dumps({"job": job}))
 
     def handle_torrent(self, body, retry_destination=None):
@@ -1347,6 +1414,9 @@ class H(BaseHTTPRequestHandler):
         try:
             with open(item["meta"], encoding="utf-8") as source:
                 meta = json.load(source)
+            if meta.get("kind") == "unshackle" and action != "cancel":
+                # Stopping the worker would not stop unshackle's own download.
+                raise RuntimeError("unshackle jobs cannot be paused; cancel and retry instead")
             if meta.get("kind") != "download":
                 return
             with open(item["state"], encoding="utf-8") as source:
@@ -1596,6 +1666,8 @@ class H(BaseHTTPRequestHandler):
             if not RCLONE_REMOTE:
                 return self._send(400, json.dumps({"error": "BILI_RCLONE_REMOTE is not configured"}))
             return self._send(200, json.dumps({"job": enqueue_remote_download(meta.get("source") or "", meta.get("pipeline") or {})}))
+        if meta.get("kind") == "unshackle":
+            return self.handle_unshackle_download(meta.get("body") or {})
         if meta.get("kind") == "drive_download":
             return self.handle_drive_download({"source": meta.get("source"), "resource_key": meta.get("resource_key")})
         if meta.get("kind") == "upload":

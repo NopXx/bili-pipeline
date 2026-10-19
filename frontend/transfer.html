@@ -44,7 +44,7 @@
       <section class="card pane-add" :class="{hide: view !== 'add'}">
         <h2>เพิ่มงานดาวน์โหลด</h2>
         <div class="segmented" role="tablist">
-          <button v-for="mode in [['torrent','BitTorrent'],['drive','Google Drive'],['bili','Bilibili']]" :key="mode[0]" role="tab" :aria-selected="source === mode[0]" :class="{on: source === mode[0]}" @click="source = mode[0]">{{mode[1]}}</button>
+          <button v-for="mode in [['torrent','BitTorrent'],['drive','Google Drive'],['bili','Bilibili'],['unshackle','Unshackle']]" :key="mode[0]" role="tab" :aria-selected="source === mode[0]" :class="{on: source === mode[0]}" @click="source = mode[0]">{{mode[1]}}</button>
         </div>
 
         <div v-if="source === 'torrent'" class="form">
@@ -86,6 +86,38 @@
           </label>
           <p class="hint">ใช้ rclone remote ที่ตั้งไว้ใน notebook · รองรับไฟล์เดี่ยว ไม่รองรับโฟลเดอร์</p>
           <button class="wide" @click="submitDrive" :disabled="!driveLink.trim()">เพิ่มเข้าคิว</button>
+        </div>
+
+        <div v-if="source === 'unshackle'" class="form">
+          <p v-if="unshackle.enabled === false" class="hint">ยังไม่ได้เปิด unshackle ใน notebook — รันเซลล์ unshackle แล้วรันเซลล์ server ใหม่</p>
+          <div class="options">
+            <label class="field"><span>Service</span>
+              <select v-model="unshackle.options.service"><option v-for="tag in unshackle.services" :key="tag" :value="tag">{{tag}}</option></select>
+            </label>
+            <label class="field"><span>ความละเอียด</span>
+              <select v-model="unshackle.options.quality"><option value="">ดีที่สุด</option><option v-for="q in ['2160','1440','1080','720','480']" :key="q" :value="q">{{q}}p</option></select>
+            </label>
+            <label class="field"><span>Range</span>
+              <select v-model="unshackle.options.range"><option v-for="r in ['SDR','HDR10','DV','HYBRID']" :key="r" :value="r">{{r}}</option></select>
+            </label>
+          </div>
+          <label class="field">
+            <span>URL หรือ Title ID</span>
+            <input v-model="unshackle.title" placeholder="https://www.primevideo.com/detail/… หรือ entity-…" @keyup.enter="submitUnshackle">
+          </label>
+          <div class="options">
+            <label class="field"><span>เสียง (ภาษา)</span><input v-model="unshackle.options.a_lang" placeholder="en, orig"></label>
+            <label class="field"><span>ซับ (เว้นว่าง = ไม่เอา)</span><input v-model="unshackle.options.s_lang" placeholder="en, th"></label>
+            <label class="field"><span>ตอน (ซีรีส์)</span><input v-model="unshackle.wanted" placeholder="S01E01, S01"></label>
+          </div>
+          <label class="field">
+            <span>Proxy</span>
+            <input v-model="unshackle.options.proxy" placeholder="socks5://user:pass@host:port">
+          </label>
+          <p class="hint">บน Kaggle ทุก service ต้องผ่าน proxy (IP ของ Kaggle ถูกบล็อก) · ไฟล์ลงแท็บไฟล์ แล้วอัปโหลดเอง</p>
+          <button class="wide" @click="submitUnshackle" :disabled="!unshackle.title.trim() || !unshackle.options.service || unshackle.submitting">
+            <span class="spinner" v-if="unshackle.submitting"></span>เพิ่มเข้าคิว
+          </button>
         </div>
 
         <div v-if="source === 'bili'" class="form">

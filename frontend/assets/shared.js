@@ -15,7 +15,7 @@ const Shared = (() => {
   const FILTERS = { all: 'ทั้งหมด', running: 'กำลังทำงาน', waiting: 'รอคิว / หยุดไว้', done: 'เสร็จแล้ว', failed: 'ล้มเหลว / ยกเลิก' }
   const KIND = {
     torrent: 'BitTorrent', drive_download: 'Google Drive', remote_download: 'คลัง Drive', download: 'Bilibili',
-    upload: 'อัปโหลด', hls: 'แปลง HLS', torrent_inspect: 'อ่าน torrent',
+    upload: 'อัปโหลด', hls: 'แปลง HLS', torrent_inspect: 'อ่าน torrent', unshackle: 'Unshackle',
   }
   const ACTIVE = ['queued', 'running', 'paused']
   const RETRYABLE = ['failed', 'interrupted', 'cancelled', 'stopped']

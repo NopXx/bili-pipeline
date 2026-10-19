@@ -1,6 +1,7 @@
 const { createApp } = Vue
 const { GROUP, FILTERS } = Shared
 
+const UNSHACKLE_DEFAULTS = { service: '', quality: '', range: 'SDR', a_lang: 'en', s_lang: 'en', proxy: '' }
 const BILI_DEFAULTS = { quality: 'auto', codec: 'auto', audio_quality: 'auto', container: 'mp4', subtitle: false, redownload: false }
 
 createApp({
@@ -12,6 +13,9 @@ createApp({
     inspectionJob: '', inspectionPending: false,
     biliUrl: '', episodes: [], selectedEpisodes: [], parsing: false,
     biliOptions: { ...BILI_DEFAULTS, ...Shared.load('bili-options', {}), redownload: false },
+    // options persist per browser; title and episodes are per job.
+    unshackle: { enabled: null, services: [], title: '', wanted: '', submitting: false,
+      options: { ...UNSHACKLE_DEFAULTS, ...Shared.load('unshackle-options', {}) } },
     BILI_QUALITIES: Shared.BILI_QUALITIES, BILI_CODECS: Shared.BILI_CODECS, BILI_AUDIO: Shared.BILI_AUDIO,
     files: [], selectedFiles: [], fileSearch: '', fileSort: 'size', filesLoadedAt: 0, uploads: [],
     jobs: [], jobFilter: 'all', laneFilter: 'all', jobSearch: '', logJob: '',
@@ -63,6 +67,8 @@ createApp({
     view(value) { if (value === 'files') this.loadFiles() },
     torrentSource() { this.resetTorrent() },
     biliOptions: { deep: true, handler(value) { Shared.save('bili-options', { ...value, redownload: false }) } },
+    'unshackle.options': { deep: true, handler(value) { Shared.save('unshackle-options', value) } },
+    source(value) { if (value === 'unshackle' && this.unshackle.enabled === null) this.loadUnshackleServices() },
   },
   methods: {
     size: Shared.size, clock: Shared.clock, basename: Shared.basename, dirname: Shared.dirname,
@@ -174,6 +180,23 @@ createApp({
         this.queued((await this.api('/api/pull', { url: this.biliUrl.trim(), episode_ids: this.selectedEpisodes, ...this.biliOptions })).job)
         this.episodes = []; this.selectedEpisodes = []
       } catch (error) { this.fail(error) }
+    },
+    async loadUnshackleServices() {
+      try {
+        const result = await this.api('/api/unshackle/services')
+        this.unshackle.enabled = result.enabled
+        this.unshackle.services = result.services
+        if (result.services.length && !result.services.includes(this.unshackle.options.service)) this.unshackle.options.service = result.services[0]
+      } catch (error) { this.fail(error) }
+    },
+    async submitUnshackle() {
+      const u = this.unshackle
+      if (!u.title.trim() || !u.options.service) return
+      u.submitting = true
+      try {
+        this.queued((await this.api('/api/unshackle/download', { ...u.options, title: u.title.trim(), wanted: u.wanted })).job)
+        u.title = ''; u.wanted = ''
+      } catch (error) { this.fail(error) } finally { u.submitting = false }
     },
     queued(job) {
       this.notify('เพิ่มงานเข้าคิวแล้ว', 'ok')
