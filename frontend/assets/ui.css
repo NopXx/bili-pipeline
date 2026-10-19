@@ -19,7 +19,7 @@ button.small{padding:5px 10px;font-size:13px;border-radius:8px}
 button.wide{width:100%;padding:10px}
 input,select{width:100%;padding:9px 11px;background:#0c1017;border:1px solid var(--line);border-radius:9px}
 input:focus,select:focus{outline:2px solid #4f8cff44;border-color:var(--blue)}
-input[type=checkbox]{width:16px;height:16px;padding:0;accent-color:var(--blue);flex:none;margin:0}
+input[type=checkbox],input[type=radio]{width:16px;height:16px;padding:0;accent-color:var(--blue);flex:none;margin:0}
 code{font-family:var(--mono);font-size:.92em;background:var(--card2);padding:1px 5px;border-radius:5px}
 .muted{color:var(--muted)}
 .grow{flex:1;min-width:120px}
@@ -95,6 +95,7 @@ code{font-family:var(--mono);font-size:.92em;background:var(--card2);padding:1px
 .small-select{width:auto;padding:6px 8px;font-size:13px}
 .selection{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#4f8cff14;border:1px solid #4f8cff44;border-radius:10px;padding:8px 10px;margin-bottom:8px}
 .selection span{flex:1;font-size:13px}
+.section-title{font-size:14px;margin:14px 0 0;display:flex;gap:8px;align-items:baseline}
 .uploads{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
 .upload-row{display:flex;align-items:center;gap:10px;font-size:13px}
 .upload-row .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

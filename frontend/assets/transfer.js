@@ -1,7 +1,7 @@
 const { createApp } = Vue
 const { GROUP, FILTERS } = Shared
 
-const UNSHACKLE_DEFAULTS = { service: '', range: 'SDR', proxy: '' }
+const UNSHACKLE_DEFAULTS = { service: '', proxy: '' }
 const BILI_DEFAULTS = { quality: 'auto', codec: 'auto', audio_quality: 'auto', container: 'mp4', subtitle: false, redownload: false }
 
 createApp({
@@ -16,8 +16,9 @@ createApp({
     // options persist per browser; title and episodes are per job.
     // Same flow as unshackle-ui: search/open -> episodes -> tracks -> pick -> queue.
     un: { enabled: null, services: [], searchable: [], input: '', busy: '', results: [], titleId: '',
-      titles: [], selected: [], tracks: null, video: '', audio: [], subs: [],
+      titles: [], selected: [], tracks: null, video: '', audio: [], subs: [], filter: { height: '', range: '', codec: '' },
       options: { ...UNSHACKLE_DEFAULTS, ...Shared.load('unshackle-options', {}) } },
+    unLoadSeq: 0,
     BILI_QUALITIES: Shared.BILI_QUALITIES, BILI_CODECS: Shared.BILI_CODECS, BILI_AUDIO: Shared.BILI_AUDIO,
     files: [], selectedFiles: [], fileSearch: '', fileSort: 'size', filesLoadedAt: 0, uploads: [],
     jobs: [], jobFilter: 'all', laneFilter: 'all', jobSearch: '', logJob: '',
@@ -71,8 +72,24 @@ createApp({
       return !this.unCanSearch || value.includes('://') || (!/\s/.test(value) && /[0-9-]/.test(value) && value.length >= 8)
     },
     unEpisodic() { return this.un.titles.some(t => t.season != null && t.number != null) },
-    unVideos() {
+    unAllVideos() {
       return [...(this.un.tracks?.video || [])].sort((a, b) => (b.height - a.height) || ((b.bitrate || 0) - (a.bitrate || 0)))
+    },
+    unVideos() {
+      const f = this.un.filter
+      return this.unAllVideos.filter(v => (!f.height || v.height === Number(f.height)) && (!f.range || v.range === f.range) &&
+        (!f.codec || (v.codec_display || v.codec) === f.codec))
+    },
+    unHeights() { return [...new Set(this.unAllVideos.map(v => v.height))] },
+    unRanges() { return [...new Set(this.unAllVideos.map(v => v.range))] },
+    unCodecs() { return [...new Set(this.unAllVideos.map(v => v.codec_display || v.codec))] },
+    unTitleLabel() {
+      const first = this.un.titles[0] || {}
+      return this.unEpisodic ? `${first.series_title || first.name} · tracks ของ ${this.un.selected[0] || ''}` : `${first.name || ''}${first.year ? ` (${first.year})` : ''}`
+    },
+    unPickLabel() {
+      const v = this.unAllVideos.find(item => item.id === this.un.video)
+      return v ? `${v.width}×${v.height} ${v.range} · เสียง ${this.un.audio.join(', ') || '-'} · ซับ ${this.un.subs.join(', ') || 'ไม่เอา'}` : 'เลือกวิดีโอ'
     },
     unAudioLangs() {
       const langs = new Map()
@@ -94,7 +111,6 @@ createApp({
     torrentSource() { this.resetTorrent() },
     biliOptions: { deep: true, handler(value) { Shared.save('bili-options', { ...value, redownload: false }) } },
     'un.options': { deep: true, handler(value) { Shared.save('unshackle-options', value) } },
-    'un.options.range'() { if (this.un.tracks) this.unLoadTracks() },
     source(value) { if (value === 'unshackle' && this.un.enabled === null) this.loadUnshackleServices() },
   },
   methods: {
@@ -238,16 +254,47 @@ createApp({
     },
     async unLoadTracks() {
       const wanted = this.unEpisodic ? this.un.selected[0] : ''
+      const body = { title: this.un.titleId, wanted }
+      Object.assign(this.un, { tracks: null, video: '', audio: [], subs: [], filter: { height: '', range: '', codec: '' } })
+      this.view = 'tracks'
+      // A newer load (another episode/title) must win over a slow one still in flight. Compare a
+      // counter, not objects: Vue hands back a reactive proxy, never the object that was assigned.
+      const load = ++this.unLoadSeq
       try {
-        const tracks = await this.unCall('tracks', '/api/unshackle/tracks', { title: this.un.titleId, wanted, range: [this.un.options.range] })
-        const best = [...(tracks.video || [])].sort((a, b) => (b.height - a.height) || ((b.bitrate || 0) - (a.bitrate || 0)))[0]
-        Object.assign(this.un, { tracks, video: best?.id || '', subs: [] })
-        const orig = this.unAudioLangs.filter(l => l.orig).map(l => l.code)
-        this.un.audio = orig.length ? orig : this.unAudioLangs.filter(l => l.code.startsWith('en')).slice(0, 1).map(l => l.code)
+        const tracks = await this.unCall('tracks', '/api/unshackle/tracks', body)
+        if (load !== this.unLoadSeq) return
+        tracks.video = tracks.video || []
+        this.un.tracks = tracks
+        this.unPickDefaults()
+        // Like unshackle-ui there is no range to choose. Most services list every range at once; AMZN
+        // fetches one manifest per range, so when only SDR came back, fetch HDR10 and DV too and merge.
+        if (tracks.video.length && tracks.video.every(v => v.range === 'SDR')) {
+          this.un.busy = 'more'
+          const extra = await Promise.allSettled(['HDR10', 'DV'].map(range =>
+            this.api('/api/unshackle/tracks', { service: this.un.options.service, proxy: this.un.options.proxy, ...body, range: [range] })))
+          if (load !== this.unLoadSeq) return
+          this.un.busy = ''
+          const video = this.un.tracks.video  // the reactive array, so the table updates
+          const seen = new Set(video.map(v => v.id))
+          for (const result of extra) {
+            for (const v of result.status === 'fulfilled' ? result.value.video || [] : []) {
+              if (!seen.has(v.id)) { seen.add(v.id); video.push(v) }
+            }
+          }
+          this.unPickDefaults()
+        }
       } catch (error) { this.fail(error) }
     },
+    unPickDefaults() {
+      // Best rung by default (highest resolution, then bitrate), original-language audio, no subtitles.
+      this.un.video = this.unAllVideos[0]?.id || ''
+      if (!this.un.audio.length) {
+        const orig = this.unAudioLangs.filter(l => l.orig).map(l => l.code)
+        this.un.audio = orig.length ? orig : this.unAudioLangs.filter(l => l.code.startsWith('en')).slice(0, 1).map(l => l.code)
+      }
+    },
     async unSubmit() {
-      const v = this.un.tracks.video.find(item => item.id === this.un.video)
+      const v = this.unAllVideos.find(item => item.id === this.un.video)
       if (!v) return
       try {
         const job = (await this.unCall('submit', '/api/unshackle/download', {
