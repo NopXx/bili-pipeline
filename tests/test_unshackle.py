@@ -101,7 +101,7 @@ class UnshackleRouteTests(unittest.TestCase):
                                                      "range": ["DV"], "proxy": "socks5://u:p@h:1"})
                 with self.assertRaises(urllib.error.HTTPError) as missing:  # unshackle's message reaches the UI
                     post("/api/unshackle/tracks", {"service": "DSNP", "title": "bad"})
-                self.assertEqual(missing.exception.code, 502)
+                self.assertEqual(missing.exception.code, 424)  # 5xx bodies get replaced by Cloudflare
                 self.assertIn("Title not found", missing.exception.read().decode())
                 with self.assertRaises(urllib.error.HTTPError) as hidden:
                     post("/api/unshackle/titles", {"service": "NF", "title": "1"})

@@ -1021,7 +1021,7 @@ class H(BaseHTTPRequestHandler):
             with urllib.request.urlopen(request, timeout=20) as response:
                 services = json.load(response).get("services") or []
         except (OSError, ValueError) as exc:
-            return self._send(502, json.dumps({"error": f"unshackle unreachable: {exc}"}))
+            return self._send(424, json.dumps({"error": f"unshackle unreachable: {exc}"}))
         available = {s.get("tag"): s for s in services}
         tested = [tag for tag in UNSHACKLE_SERVICES if tag in available]
         self._send(200, json.dumps({"enabled": True, "services": tested,
@@ -1057,7 +1057,9 @@ class H(BaseHTTPRequestHandler):
         try:
             result = self._unshackle(path, request)
         except (LookupError, OSError) as exc:
-            return self._send(502, json.dumps({"error": str(exc)}))
+            # 424, not 502: a Cloudflare tunnel replaces 5xx bodies with its own page, which would hide
+            # unshackle's message (e.g. "Title not found", "wrong country") from the UI.
+            return self._send(424, json.dumps({"error": str(exc)}))
         self._send(200, json.dumps(result))
 
     def handle_unshackle_search(self, body):
