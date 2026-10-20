@@ -331,7 +331,9 @@
             const extra = await this.api('/api/unshackle/tracks', { ...this.utTrackBody(r.title), range: [range] })
             if (seq !== this.utSeq) return
             const seen = new Set(r.tracks.video.map(videoKey))
-            for (const v of extra.video || []) if (!seen.has(videoKey(v))) { seen.add(videoKey(v)); r.tracks.video.push(v) }
+            // Only tracks of the range asked for: a title without DV answers the DV request with plain
+            // SDR-flagged UHD rungs that the SDR manifest a download resolves to does not have.
+            for (const v of extra.video || []) if (v.range === range && !seen.has(videoKey(v))) { seen.add(videoKey(v)); r.tracks.video.push(v) }
           } catch { /* that range does not exist for this title */ }
         })))
         if (seq === this.utSeq) this.ut.more = false
