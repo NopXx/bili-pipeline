@@ -90,56 +90,41 @@
 
         <div v-if="source === 'unshackle'" class="form">
           <p v-if="un.enabled === false" class="hint">ยังไม่ได้เปิด unshackle ใน notebook — รันเซลล์ unshackle แล้วรันเซลล์ server ใหม่</p>
-          <div class="options">
-            <label class="field"><span>Service</span>
-              <select v-model="un.options.service" @change="unReset()"><option v-for="tag in un.services" :key="tag" :value="tag">{{tag}}</option></select>
-            </label>
-            <label class="field"><span>Proxy</span><input v-model="un.options.proxy" placeholder="socks5://user:pass@host:port"></label>
+          <p class="hint">Search a service, or open a title directly by ID or URL.</p>
+          <div class="un-quick" v-if="unQuick.length">
+            <span class="un-label">Quick</span>
+            <button v-for="tag in unQuick" :key="tag" type="button" class="un-pill" :class="{on: un.service === tag}" @click="unPickService(tag)">{{tag}}</button>
           </div>
-          <div class="options" v-if="(un.serviceOptions[un.options.service] || []).length && un.options.svc[un.options.service]">
-            <template v-for="o in un.serviceOptions[un.options.service]" :key="o.name">
-              <label class="check" v-if="o.type === 'bool'" :title="o.help"><input type="checkbox" v-model="un.options.svc[un.options.service][o.name]" @change="unReset()"> {{o.label}}</label>
-              <label class="field" v-else :title="o.help"><span>{{o.label}}</span>
-                <select v-if="o.choices.length" v-model="un.options.svc[un.options.service][o.name]" @change="unReset()"><option v-for="c in o.choices" :key="c" :value="c">{{c}}</option></select>
-                <input v-else v-model="un.options.svc[un.options.service][o.name]" :placeholder="o.help">
-              </label>
-            </template>
-          </div>
-          <label class="field">
-            <span>{{unCanSearch ? 'ค้นหา หรือวาง URL / Title ID' : 'URL หรือ Title ID'}}</span>
-            <input v-model="un.input" placeholder="https://… หรือชื่อเรื่อง" @keyup.enter="unGo">
-          </label>
-          <button class="wide" @click="unGo" :disabled="!un.input.trim() || !un.options.service || !!un.busy">
-            <span class="spinner" v-if="un.busy === 'search' || un.busy === 'open'"></span>{{unLooksLikeId ? 'เปิด' : 'ค้นหา'}}
-          </button>
-
-          <div v-if="un.results.length && !un.titles.length" class="picker">
-            <div class="picker-head"><span>ผลการค้นหา</span><span class="muted">{{un.results.length}} รายการ</span></div>
-            <div class="picker-list">
-              <label class="row" v-for="r in un.results" :key="r.id" @click.prevent="unOpen(r.id)">
-                <span class="name" :title="r.description">{{r.title}}</span><span class="size">{{r.label}}</span>
-              </label>
+          <form class="un-search" @submit.prevent="unSearch">
+            <select v-model="un.service" @change="unPickService(un.service)" aria-label="Service"><option v-for="tag in un.services" :key="tag" :value="tag">{{tag}}</option></select>
+            <input v-model="un.query" type="search" placeholder="Search titles, or paste a title ID / URL...">
+            <div class="un-actions">
+              <button type="submit" :disabled="un.searching || !unCanSubmit || !unCanSearch" :title="unCanSearch ? '' : 'This service has no search; use Open with an ID or URL'">
+                <span class="spinner" v-if="un.searching"></span>{{un.searching ? 'Searching...' : 'Search'}}
+              </button>
+              <button type="button" class="ghost" @click="unOpen(un.query.trim())" :disabled="!unCanSubmit" title="Load this exact title ID or URL without searching">Open ›</button>
+            </div>
+            <!-- The only options search accepts: profile, proxy, no_proxy. -->
+            <div class="un-options">
+              <span class="un-label">Options</span>
+              <select v-if="unProfiles.length" v-model="un.profile" class="small-select" aria-label="Profile"><option v-for="p in unProfiles" :key="p" :value="p">{{p}}</option></select>
+              <input v-model="un.proxy" class="filter grow" :disabled="un.noProxy" placeholder="Proxy URI or country" aria-label="Proxy or country code" title="Set a proxy URI or country code.">
+              <button type="button" class="un-pill" :class="{on: un.noProxy}" @click="un.noProxy = !un.noProxy" title="Force disable all proxy use for this search">No proxy</button>
+            </div>
+          </form>
+          <div v-if="un.searchError" class="job-error">{{un.searchError}}</div>
+          <div v-else-if="un.results && !un.results.length" class="empty">No results<br><small>Try a different query or service.</small></div>
+          <div v-else-if="un.results" class="files un-results">
+            <div class="un-result" v-for="r in un.results" :key="r.id" :class="{dim: ut && ut.opening && ut.id !== r.id}" @click="unOpen(r.id)">
+              <div class="un-result-main">
+                <div><b>{{r.title}}</b> <span class="tag" v-if="r.label">{{r.label}}</span></div>
+                <div class="muted un-ellipsis" v-if="r.description">{{r.description}}</div>
+                <div class="un-mono un-ellipsis">{{r.id}}</div>
+              </div>
+              <span class="spinner" v-if="ut && ut.opening && ut.id === r.id"></span><span v-else class="muted">›</span>
             </div>
           </div>
-
-          <div v-if="un.titles.length" class="picker">
-            <div class="picker-head">
-              <label class="check" v-if="unEpisodic"><input type="checkbox" :checked="un.selected.length === un.titles.length" :indeterminate.prop="un.selected.length > 0 && un.selected.length < un.titles.length" @change="un.selected = $event.target.checked ? un.titles.map(unCode) : []"> เลือกทั้งหมด</label>
-              <span v-else class="name">{{un.titles[0].name}} <small v-if="un.titles[0].year">({{un.titles[0].year}})</small></span>
-              <span class="muted" v-if="unEpisodic">{{un.titles[0].series_title || un.titles[0].name}} · {{un.selected.length}} / {{un.titles.length}} ตอน</span>
-            </div>
-            <div class="picker-list" v-if="unEpisodic">
-              <label class="row" v-for="t in un.titles" :key="t.id">
-                <input type="checkbox" :value="unCode(t)" v-model="un.selected">
-                <span class="name"><small>{{unCode(t)}}</small> {{t.name}}</span>
-              </label>
-            </div>
-            <button class="wide" @click="unLoadTracks" :disabled="!!un.busy || (unEpisodic && !un.selected.length)">
-              <span class="spinner" v-if="un.busy === 'tracks'"></span>{{un.busy === 'tracks' ? 'กำลังโหลด tracks (อาจใช้เวลาเป็นนาที)…' : un.tracks ? 'โหลด tracks ใหม่' : 'โหลด tracks'}}
-            </button>
-            <button class="ghost wide" v-if="un.tracks && view !== 'tracks'" @click="view = 'tracks'">ดู tracks ที่โหลดแล้ว →</button>
-          </div>
-
+          <button class="ghost wide" v-if="ut && view !== 'title'" @click="view = 'title'">กลับไปหน้า {{utHeader}} →</button>
         </div>
 
         <div v-if="source === 'bili'" class="form">
@@ -188,74 +173,200 @@
       <!-- Queue and files -->
       <section class="card pane-main" :class="{hide: view === 'add'}">
         <div class="pane-tabs">
-          <button :class="{on: view !== 'files' && view !== 'tracks'}" @click="view = 'queue'">คิวงาน <em>{{visibleJobs.length}}</em></button>
+          <button :class="{on: view !== 'files' && view !== 'title'}" @click="view = 'queue'">คิวงาน <em>{{visibleJobs.length}}</em></button>
           <button :class="{on: view === 'files'}" @click="view = 'files'">ไฟล์ที่ดาวน์โหลด <em>{{files.length}}</em></button>
-          <button v-if="un.tracks || un.busy === 'tracks'" :class="{on: view === 'tracks'}" @click="view = 'tracks'">Tracks <em>{{un.tracks ? un.tracks.video.length : '…'}}</em></button>
+          <button v-if="ut" :class="{on: view === 'title'}" @click="view = 'title'">{{utHeader}}</button>
         </div>
 
-        <template v-if="view === 'tracks'">
-          <div class="empty" v-if="!un.tracks">กำลังโหลด tracks… <span class="spinner"></span></div>
-          <template v-else>
-            <p class="muted">{{unTitleLabel}}<span v-if="un.busy === 'more'"> · <span class="spinner"></span> กำลังหา HDR10 / DV เพิ่ม…</span></p>
-            <div class="toolbar">
-              <select v-model="un.filter.height" class="small-select" aria-label="ความละเอียด"><option value="">ทุกความละเอียด</option><option v-for="h in unHeights" :key="h" :value="h">{{h}}p</option></select>
-              <select v-model="un.filter.range" class="small-select" aria-label="Range"><option value="">ทุก range</option><option v-for="r in unRanges" :key="r" :value="r">{{r}}</option></select>
-              <select v-model="un.filter.codec" class="small-select" aria-label="Codec"><option value="">ทุก codec</option><option v-for="c in unCodecs" :key="c" :value="c">{{c}}</option></select>
-              <span class="muted">{{unVideos.length}} / {{un.tracks.video.length}} streams</span>
+        <template v-if="view === 'title' && ut">
+          <div class="un-page">
+            <div class="un-head">
+              <h2>{{utHeader}}</h2>
+              <span class="tag" v-if="ut.titles[0] && ut.titles[0].type">{{utEpisodic ? 'series' : ut.titles[0].type}}</span>
+              <span class="muted" v-if="ut.titles[0] && ut.titles[0].year">{{ut.titles[0].year}}</span>
             </div>
-            <h3 class="section-title">วิดีโอ</h3>
-            <div class="files tracks-list tall">
-              <label class="row" v-for="v in unVideos" :key="v.id">
-                <input type="radio" :value="v.id" v-model="un.video">
-                <span class="name">{{v.width}}×{{v.height}} · {{v.range}} · {{v.codec_display || v.codec}}<small v-if="v.fps"> · {{Math.round(v.fps * 100) / 100}} fps</small></span>
-                <span class="size">{{(v.bitrate / 1000).toFixed(2)}} Mbps</span>
-              </label>
-              <div class="empty" v-if="!unVideos.length">ไม่มี stream ที่ตรงกับตัวกรอง</div>
-            </div>
-            <h3 class="section-title">เสียง <small class="muted">เลือก {{un.audio.length}} ภาษา · {{un.audio.join(', ')}}</small></h3>
-            <div class="toolbar">
-              <div class="segmented small">
-                <button v-for="q in [['rec','แนะนำ'],['all','ทั้งหมด'],['th','ไทย'],['en','อังกฤษ'],['atmos','Atmos']]" :key="q[0]" :class="{on: un.audioQuick === q[0]}" @click="un.audioQuick = q[0]">{{q[1]}}</button>
+            <p class="un-mono">{{ut.service}} · {{ut.id}}</p>
+
+            <div class="empty" v-if="ut.opening"><span class="spinner"></span> Opening…</div>
+            <div class="job-error" v-else-if="ut.error">{{ut.error}}</div>
+            <template v-else>
+              <!-- Episodes (series): pick which episodes, then Refresh to load their tracks. -->
+              <div class="un-card" v-if="utEpisodic && utEpisodeOptions.length">
+                <div class="un-row-between">
+                  <b>Episodes <span class="muted">· {{ut.epSel.length ? ut.epSel.length + ' selected' : 'all ' + utEpisodeOptions.length + ' episodes'}}</span></b>
+                  <div class="un-links">
+                    <a :class="{hot: utStale}" @click="!ut.loading && utLoad(ut.epSel)" title="Refresh selection"><span class="spinner" v-if="ut.loading"></span> Refresh</a>
+                    <a class="hot" @click="ut.epSel = utEpisodeOptions.map(o => o.value)" title="Select every episode">All</a>
+                    <a v-if="ut.epSel.length" @click="ut.epSel = []">Clear</a>
+                  </div>
+                </div>
+                <div class="qchips un-eps">
+                  <template v-for="o in utEpisodeOptions" :key="o.value">
+                    <span class="un-break" v-if="o.breakBefore"></span>
+                    <button type="button" class="qchip" :class="{on: ut.epSel.includes(o.value)}" @click="utToggleEp(o.value)">{{o.value}}</button>
+                  </template>
+                </div>
+                <p class="hint" v-if="utSplit">S01E01.2 is part 2 of one episode. Pick any part on its own, or all of them for the whole episode.</p>
+                <p class="hint hot" v-if="utStale && !ut.loading">Selection changed. Click "Refresh selection" to update available tracks.</p>
               </div>
-              <input v-model="un.audioSearch" class="filter grow" placeholder="ค้นหาภาษา / codec…">
-            </div>
-            <div class="files tracks-list">
-              <label class="row" v-for="lang in unAudioRows" :key="lang.code">
-                <input type="checkbox" :value="lang.code" v-model="un.audio">
-                <span class="name">{{lang.code}} <span class="tag" v-if="lang.orig">orig</span> <span class="tag warn" v-if="lang.atmos">Atmos</span></span><span class="size">{{lang.detail}}</span>
-              </label>
-              <div class="empty" v-if="!unAudioRows.length">ไม่มีเสียงที่ตรงกับตัวกรอง</div>
-            </div>
-            <div class="audio-quality" v-if="unAudioLadder.length > 1">
-              <small class="muted">QUALITY · {{unAudioPicked ? unAudioLabel(unAudioPicked, true) : 'best available'}}</small>
-              <div class="qchips">
-                <button class="qchip" :class="{on: !un.audioPick}" @click="un.audioPick = ''">Auto</button>
-                <button class="qchip" v-for="a in unAudioLadder" :key="unAudioKey(a)" :class="{on: un.audioPick === unAudioKey(a)}"
-                  @click="un.audioPick = un.audioPick === unAudioKey(a) ? '' : unAudioKey(a)">{{unAudioLabel(a, true)}} <span class="tag warn" v-if="a.atmos">Atmos</span></button>
-              </div>
-            </div>
-            <h3 class="section-title">ซับ <small class="muted">{{un.subs.length ? 'เลือก ' + un.subs.length + ' ภาษา · ' + un.subs.join(', ') + ' · บันทึกเป็น SRT' : 'ไม่เอาซับ'}}</small></h3>
-            <div class="toolbar">
-              <div class="segmented small">
-                <button v-for="q in [['rec','แนะนำ'],['all','ทั้งหมด'],['th','ไทย'],['en','อังกฤษ'],['forced','Forced'],['sdh','SDH / CC']]" :key="q[0]" :class="{on: un.subQuick === q[0]}" @click="un.subQuick = q[0]">{{q[1]}}</button>
-              </div>
-              <input v-model="un.subSearch" class="filter grow" placeholder="ค้นหาภาษา…">
-            </div>
-            <div class="files tracks-list">
-              <label class="row" v-for="lang in unSubRows" :key="lang.code">
-                <input type="checkbox" :value="lang.code" v-model="un.subs">
-                <span class="name">{{lang.code}}</span><span class="size">{{lang.detail}}</span>
-              </label>
-              <div class="empty" v-if="!unSubRows.length">ไม่มีซับที่ตรงกับตัวกรอง</div>
-            </div>
-            <div class="selection">
-              <span>{{unPickLabel}}</span>
-              <button class="small" @click="unSubmit" :disabled="!un.video || !un.audio.length || !!un.busy && un.busy !== 'more'">
-                <span class="spinner" v-if="un.busy === 'submit'"></span>ดาวน์โหลด{{unEpisodic ? ' ' + un.selected.length + ' ตอน' : ''}}
-              </button>
-            </div>
-            <p class="hint">ไฟล์ลงแท็บไฟล์ แล้วอัปโหลดเอง · บน Kaggle ทุก service ต้องใส่ Proxy</p>
-          </template>
+
+              <div class="un-card empty" v-if="ut.loading"><span class="spinner"></span> Loading tracks…</div>
+              <div class="job-error" v-else-if="ut.trackError">{{ut.trackError}}</div>
+              <div class="un-card muted" v-else-if="!utCombined">No tracks loaded. Pick episodes and click "Refresh selection".</div>
+              <template v-else>
+                <!-- Step 1 · Video renditions (filterable, single-select table) -->
+                <section class="un-section">
+                  <div class="un-row-between">
+                    <div><div class="un-step">Step 1 · Choose video</div><h3>Select a Video Rendition</h3></div>
+                    <span class="un-mono">Showing {{utVideoRows.length}} of {{utVideoLadder.length}} streams<span v-if="ut.more"> · <span class="spinner"></span> HDR10 / DV…</span></span>
+                  </div>
+                  <div class="un-card un-filters">
+                    <label v-for="f in [
+                        ['Resolution', 'vRes', [['all','All'],['2160','4K UHD (2160p)'],['1440','QHD (1440p)'],['1080','FHD (1080p)'],['720','HD (720p)'],['sd','SD (<720p)']]],
+                        ['Dynamic range', 'vRange', [['all','All'],['DV','Dolby Vision'],['HDR','HDR'],['SDR','SDR']]],
+                        ['Codec', 'vCodec', [['all','All'], ...utVideoCodecs.map(c => [c, c])]],
+                        ['Sort by', 'vSort', [['default','Resolution → Bitrate'],['bitrate-desc','Bitrate high → low'],['bitrate-asc','Bitrate low → high']]]]" :key="f[1]">
+                      <span class="un-label">{{f[0]}}</span>
+                      <select v-model="ut[f[1]]" class="small-select"><option v-for="o in f[2]" :key="o[0]" :value="o[0]">{{o[1]}}</option></select>
+                    </label>
+                  </div>
+                  <div class="un-card un-table-wrap">
+                    <table class="un-table">
+                      <thead><tr><th class="c">Select</th><th>Stream ID</th><th>Resolution</th><th>Range</th><th>Codec</th><th class="r">FPS</th><th class="r">Bitrate</th></tr></thead>
+                      <tbody>
+                        <tr :class="{on: ut.videoPick === null}" @click="utPickVideo(null)">
+                          <td class="c"><input type="radio" readonly :checked="ut.videoPick === null"></td>
+                          <td colspan="6"><b>Auto</b> <span class="muted">· best available</span></td>
+                        </tr>
+                        <tr v-for="t in utVideoRows" :key="unVideoKey(t)" :class="{on: ut.videoPick === unVideoKey(t)}" @click="utPickVideo(t)">
+                          <td class="c"><input type="radio" readonly :checked="ut.videoPick === unVideoKey(t)"></td>
+                          <td class="un-mono">{{t.id}}</td>
+                          <td><b>{{t.width}}×{{t.height}}</b> <span class="un-mono">{{utQualityLabel(t)}}</span></td>
+                          <td><span class="un-badge" :class="unRangeGroup(t).toLowerCase()">{{unRangeGroup(t) === 'SDR' ? 'SDR' : (t.range_display || t.range)}}</span></td>
+                          <td class="un-mono">{{t.codec_display || t.codec}}</td>
+                          <td class="r un-num">{{t.fps ? Number(Number(t.fps).toFixed(3)) : '—'}}</td>
+                          <td class="r un-num">{{t.bitrate ? (t.bitrate / 1000).toFixed(2) + ' Mbps' : '—'}}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <!-- Step 2 · Audio & subtitles (multi-select by language) -->
+                <section class="un-section">
+                  <div class="un-step">Step 2 · Choose audio &amp; subtitles</div><h3>Audio &amp; Subtitles</h3>
+                  <div class="un-cols">
+                    <div class="un-card un-col">
+                      <div class="un-row-between">
+                        <div><b>Audio tracks</b><div class="un-mono">{{ut.audioSel.length ? 'Selected: ' + ut.audioSel.length + ' langs' : 'Default: original language'}}</div></div>
+                        <button class="ghost small" @click="utRecommended('audioSel', utCombined.audioLangs)">Recommended</button>
+                      </div>
+                      <input v-model="ut.audioSearch" class="filter" placeholder="Search language, codec, Atmos…">
+                      <div class="qchips"><button v-for="q in [['all','All'],['th','Thai'],['en','English'],['atmos','Atmos']]" :key="q[0]" class="qchip un-mono" :class="{dark: ut.audioQuick === q[0]}" @click="ut.audioQuick = q[0]">{{q[1]}}</button></div>
+                      <div class="un-langs">
+                        <div class="un-lang" v-for="t in utAudioRows" :key="t.id" :class="{on: ut.audioSel.includes(t.language || '')}" @click="utToggleLang('audioSel', t.language)">
+                          <input type="checkbox" readonly :checked="ut.audioSel.includes(t.language || '')">
+                          <div class="grow">
+                            <div><b>{{t.language || 'und'}}</b> <span class="tag" v-if="unIsOriginal(t)">orig</span> <span class="tag warn" v-if="t.atmos">Atmos</span></div>
+                            <div class="un-mono">{{t.codec_display || t.codec}}<template v-if="t.channels != null"> · {{Number(t.channels).toFixed(1)}}ch</template><template v-if="t.bitrate != null"> · {{(t.bitrate / 1000).toFixed(2)}} Mbps</template></div>
+                          </div>
+                          <span class="un-mono">{{t.id}}</span>
+                        </div>
+                        <p class="empty" v-if="!utAudioRows.length">No matching tracks.</p>
+                      </div>
+                      <!-- Audio quality variant (pins acodec/channels/abitrate for the download). -->
+                      <div v-if="utAudioLadder.length > 1">
+                        <div class="un-label">Quality<span v-if="ut.audioPick === null"> · best available</span></div>
+                        <div class="qchips">
+                          <button class="qchip" :class="{on: ut.audioPick === null}" @click="utPickAudio(null)"><span v-if="ut.audioPick === null">✓</span> Auto</button>
+                          <button class="qchip" v-for="t in utAudioLadder" :key="unAudioKey(t)" :class="{on: ut.audioPick === unAudioKey(t)}" @click="utPickAudio(t)">
+                            <span v-if="ut.audioPick === unAudioKey(t)">✓</span> {{utAudioLabel(t)}} <span class="tag warn" v-if="t.atmos">Atmos</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="un-card un-col">
+                      <div class="un-row-between">
+                        <div><b>Subtitles</b><div class="un-mono">{{ut.subSel.length ? 'Selected: ' + ut.subSel.length + ' langs' : 'Default: all'}}</div></div>
+                        <button class="ghost small" @click="utRecommended('subSel', utCombined.subLangs)">Recommended</button>
+                      </div>
+                      <input v-model="ut.subSearch" class="filter" placeholder="Search subtitle language…">
+                      <div class="qchips"><button v-for="q in [['all','All'],['th','Thai'],['en','English'],['forced','Forced'],['sdh','SDH / CC']]" :key="q[0]" class="qchip un-mono" :class="{dark: ut.subQuick === q[0]}" @click="ut.subQuick = q[0]">{{q[1]}}</button></div>
+                      <div class="un-langs">
+                        <div class="un-lang" v-for="t in utSubRows" :key="t.id" :class="{on: ut.subSel.includes(t.language || '')}" @click="utToggleLang('subSel', t.language)">
+                          <input type="checkbox" readonly :checked="ut.subSel.includes(t.language || '')">
+                          <div class="grow">
+                            <div><b>{{t.language || 'und'}}</b> <span class="tag" v-if="t.forced">forced</span> <span class="tag" v-if="t.sdh">SDH</span> <span class="tag" v-if="t.cc">CC</span></div>
+                            <div class="un-mono">{{t.codec || 'WebVTT'}}</div>
+                          </div>
+                          <span class="un-mono">{{t.id}}</span>
+                        </div>
+                        <p class="empty" v-if="!utSubRows.length">No matching tracks.</p>
+                      </div>
+                    </div>
+                  </div>
+                  <a class="un-more" v-if="utCombined.audioLangs.length > 4 || utCombined.subLangs.length > 4" @click="ut.showAllLangs = !ut.showAllLangs">
+                    {{ut.showAllLangs ? 'Show fewer languages' : `Show all languages (${utCombined.audioLangs.length} audio · ${utCombined.subLangs.length} subs)`}}
+                  </a>
+                </section>
+
+                <!-- Service + advanced options (kept, folded away). -->
+                <template v-for="form in [
+                    {title: ut.service + ' options', fields: utSvcFields, values: ut.svcValues},
+                    {title: 'Advanced options', fields: utAdvancedFields, values: ut.advanced}]" :key="form.title">
+                  <details class="un-options-form" v-if="form.fields.length">
+                    <summary><span>{{form.title}}<em v-if="utSetCount(form.fields, form.values)"> · {{utSetCount(form.fields, form.values)}} set</em></span><span class="muted">›</span></summary>
+                    <div class="un-form-body">
+                      <div v-for="g in utGroups(form.fields)" :key="g.name || '_'">
+                        <div class="un-label" v-if="g.name">{{g.name}}</div>
+                        <div class="qchips" v-if="g.bools.length">
+                          <button v-for="f in g.bools" :key="f.key" type="button" class="un-pill" :class="{on: form.values[f.key] === true}" :title="f.help" @click="form.values[f.key] = form.values[f.key] !== true">{{f.label}}</button>
+                        </div>
+                        <div class="options" v-if="g.inputs.length">
+                          <label class="field" v-for="f in g.inputs" :key="f.key"><span :title="f.help">{{f.label}}</span>
+                            <select v-if="f.type === 'choice'" v-model="form.values[f.key]"><option v-if="!f.default" value="">default</option><option v-for="c in f.choices" :key="c" :value="c">{{c}}</option></select>
+                            <input v-else :type="f.type === 'int' || f.type === 'num' ? 'number' : 'text'" :step="f.type === 'num' ? 'any' : null" :placeholder="f.placeholder" v-model="form.values[f.key]">
+                            <small class="muted" v-if="f.help">{{f.help}}</small>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  </details>
+                </template>
+
+                <!-- Raw CLI-style track list, preserved for exact inspection. -->
+                <details class="un-options-form">
+                  <summary><span>Raw track list ({{utCombined.counts.video}} video · {{utCombined.counts.audio}} audio · {{utCombined.counts.subtitles}} subs)</span></summary>
+                  <div class="un-form-body un-raw">
+                    <div v-for="e in utRaw" :key="e.code || e.name">
+                      <b v-if="e.code">{{e.code}} · {{e.name}}</b>
+                      <template v-for="g in [['Video', e.video], ['Audio', e.audio], ['Subtitles', e.subs]]" :key="g[0]">
+                        <div v-if="g[1].length"><div class="un-label">{{g[0]}} ({{g[1].length}})</div><div v-for="(line, i) in g[1]" :key="i">{{line}}</div></div>
+                      </template>
+                    </div>
+                  </div>
+                </details>
+
+                <div class="job-error" v-if="ut.startError">{{ut.startError}}</div>
+
+                <!-- Step 3 · sticky download bar -->
+                <div class="un-stepbar">
+                  <div class="grow">
+                    <div class="un-step">Step 3 · Download</div>
+                    <div class="qchips">
+                      <span class="un-badge">{{utVideoPicked ? `${utVideoPicked.width}×${utVideoPicked.height} · ${unRangeGroup(utVideoPicked)} · ${utVideoPicked.codec_display || utVideoPicked.codec}` : 'Video: best available'}}</span>
+                      <span class="un-badge">{{ut.audioSel.length ? ut.audioSel.length + ' audio langs' : 'Audio: original'}}</span>
+                      <span class="un-badge">{{ut.subSel.length ? ut.subSel.length + ' subtitle langs' : 'Subs: all'}}</span>
+                    </div>
+                  </div>
+                  <button @click="utStart" :disabled="ut.starting || ut.loading || !!ut.trackError">
+                    <span class="spinner" v-if="ut.starting"></span>{{ut.starting ? 'Starting…' : '⬇ Start download'}}
+                  </button>
+                </div>
+              </template>
+            </template>
+          </div>
         </template>
 
         <template v-else-if="view !== 'files'">
@@ -324,6 +435,7 @@
   <script src="/assets/qrcode.js"></script>
   <script src="/assets/bili-login.js"></script>
   <script src="/assets/shared.js"></script>
+  <script src="/assets/unshackle.js"></script>
   <script src="/assets/transfer.js"></script>
 </body>
 </html>

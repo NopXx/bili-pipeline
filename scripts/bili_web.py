@@ -68,17 +68,81 @@ def _unshackle_services(refresh=False):
     return _UNSHACKLE_CATALOG
 
 
-def _service_options(service):
-    """A service's own CLI options (cli_params of kind "option") as simple form fields, like unshackle-ui."""
-    fields = []
-    for param in service.get("cli_params") or []:
-        if param.get("kind") != "option" or param.get("multiple"):
-            continue
-        label = next((o[2:] for o in param.get("opts") or [] if o.startswith("--")), param["name"])
-        fields.append({"name": param["name"], "label": label, "help": param.get("help") or "",
-                       "type": "bool" if param.get("is_flag") else "text", "choices": param.get("choices") or [],
-                       "default": param.get("default") if param.get("default") is not None else ""})
-    return fields
+# /api/download fields the Unshackle tab may send, by type: unshackle-ui's selectors plus its advanced
+# option catalog (src/lib/download.ts). A service's own options are checked against its cli_params.
+UNSHACKLE_FIELDS = {
+    "wanted": "csv", "quality": "ints", "vcodec": "csv", "range": "csv", "a_lang": "csv", "s_lang": "csv",
+    **dict.fromkeys(("video_only", "audio_only", "subs_only", "chapters_only", "no_video", "no_audio", "no_subs",
+                     "no_chapters", "best_available", "worst", "repack", "latest_episode", "no_atmos",
+                     "audio_description", "split_audio", "forced_subs", "exact_lang", "no_folder", "no_source", "no_mux",
+                     "no_attachments", "adaptive_workers", "continue_downloads", "skip_dl", "export", "cdm_only",
+                     "enrich", "daily", "no_proxy", "no_proxy_download", "no_cache", "reset_cache"), "bool"),
+    **dict.fromkeys(("latest_episodes", "vbitrate", "abitrate", "workers", "downloads", "download_processes",
+                     "tmdb_id"), "int"),
+    "channels": "num",
+    **dict.fromkeys(("acodec", "require_subs", "lang", "v_lang", "forced_s_lang", "require_audio",
+                     "require_video"), "csv"),
+    **dict.fromkeys(("sub_format", "profile", "tag", "output_dir", "slow", "cdm", "imdb_id", "anilist_id",
+                     "proxy", "proxy_download"), "text"),
+}
+PROXY_RE = re.compile(r"(socks5h?|https?)://\S+|[A-Za-z]{2}(:\d+)?")
+
+
+def _check_value(key, kind, value):
+    """One request value, type-checked; raises ValueError with a message for the UI."""
+    if kind == "bool":
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be true or false")
+        return value
+    if kind in ("int", "num"):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be a number")
+        return int(value) if kind == "int" else float(value)
+    if kind in ("csv", "ints"):
+        items = value if isinstance(value, list) else [value]
+        if kind == "ints":
+            return [_check_value(key, "int", item) for item in items]
+        if not all(isinstance(item, str) and 0 < len(item) <= 100 for item in items):
+            raise ValueError(f"{key} must be a list of short strings")
+        return items
+    if not isinstance(value, (str, bool)) or len(str(value)) > 500:
+        raise ValueError(f"{key} must be text")
+    if key in ("proxy", "proxy_download") and not PROXY_RE.fullmatch(str(value)):
+        raise ValueError(f"{key} must be a socks5:// or http(s):// URL, or a country code")
+    if key == "output_dir" and (os.path.isabs(str(value)) or ".." in str(value).split("/")):
+        raise ValueError("output_dir must be relative to the downloads directory")
+    return value
+
+
+def _service_kinds(service):
+    """The service's own CLI options from unshackle's cli_params, as name -> value type."""
+    kinds = {}
+    for param in (_unshackle_services().get(service) or {}).get("cli_params") or []:
+        if param.get("kind") == "option":
+            kinds[param["name"]] = ("bool" if param.get("is_flag") else "csv" if param.get("multiple")
+                                    else {"integer": "int", "float": "num"}.get(param.get("type"), "text"))
+    return kinds
+
+
+def _check_request(service, values, fields):
+    """Type-check a dict of unshackle fields; unknown keys are refused (they could reach unshackle's handler)."""
+    if not isinstance(values, dict):
+        raise ValueError("request must be an object")
+    if not values:
+        return {}
+    try:
+        kinds = {**_service_kinds(service), **fields}
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"unshackle unreachable: {exc}") from None
+    out = {}
+    for key, value in values.items():
+        if key not in kinds:
+            raise ValueError(f"unknown option: {key}")
+        if value is not None:
+            out[key] = _check_value(key, kinds[key], value)
+    return out
+
+
 JOBS_DIR = os.path.realpath(os.environ.get("BILI_JOBS_DIR", os.path.join(HERE, "jobs")))
 DOWNLOADS_DIR = os.path.realpath(os.environ.get("BILI_DOWNLOADS_DIR", "/opt/bili-downloads"))
 TORRENT_DOWNLOADS_DIR = os.path.realpath(os.path.join(DOWNLOADS_DIR, "torrents"))
@@ -1045,34 +1109,20 @@ class H(BaseHTTPRequestHandler):
             available = _unshackle_services(refresh=True)
         except (OSError, ValueError) as exc:
             return self._send(424, json.dumps({"error": f"unshackle unreachable: {exc}"}))
+        try:  # named credential profiles per service; optional (older servers have no /api/profiles)
+            profiles = self._unshackle_get("/api/profiles").get("profiles") or {}
+        except (OSError, ValueError):
+            profiles = {}
         tested = [tag for tag in UNSHACKLE_SERVICES if tag in available]
         self._send(200, json.dumps({"enabled": True, "services": tested,
                                     "searchable": [tag for tag in tested if available[tag].get("has_search")],
-                                    "options": {tag: _service_options(available[tag]) for tag in tested}}))
+                                    "params": {tag: available[tag].get("cli_params") or [] for tag in tested},
+                                    "profiles": {tag: profiles[tag] for tag in tested if profiles.get(tag)}}))
 
-    def _service_values(self, service, body):
-        """The service's own options (e.g. DSNP --imax) from body["svc"], checked against its cli_params."""
-        values = body.get("svc") or {}
-        if not isinstance(values, dict) or not values:
-            return {}
-        try:
-            allowed = {o["name"]: o for o in _service_options(_unshackle_services().get(service) or {})}
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"unshackle unreachable: {exc}") from None
-        out = {}
-        for key, value in values.items():
-            option = allowed.get(key)
-            if option is None:
-                raise ValueError(f"unknown {service} option: {key}")
-            if option["type"] == "bool":
-                if value is True:
-                    out[key] = True
-            elif str(value).strip():
-                value = str(value).strip()[:200]
-                if option["choices"] and value not in option["choices"]:
-                    raise ValueError(f"{key} must be one of {', '.join(option['choices'])}")
-                out[key] = value
-        return out
+    def _unshackle_get(self, path):
+        request = urllib.request.Request(UNSHACKLE_URL + path, headers={"X-Secret-Key": UNSHACKLE_KEY})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.load(response)
 
     def _unshackle(self, path, request):
         """POST to unshackle and return its JSON; an unshackle error becomes a 4xx/5xx for the browser."""
@@ -1095,15 +1145,13 @@ class H(BaseHTTPRequestHandler):
         service = str(body.get("service") or "").strip()
         if service not in UNSHACKLE_SERVICES:
             return self._send(400, json.dumps({"error": "unsupported service"}))
+        # Transport (profile / proxy / no_proxy) and the service's own options, like unshackle-ui sends.
+        transport = {key: body[key] for key in ("profile", "proxy", "no_proxy") if body.get(key) not in (None, "", False)}
         try:
-            request = {"service": service, **self._service_values(service, body), **extra}
+            request = {"service": service, **_check_request(service, body.get("svc") or {}, {}),
+                       **_check_request(service, transport, {k: UNSHACKLE_FIELDS[k] for k in transport}), **extra}
         except ValueError as exc:
             return self._send(400, json.dumps({"error": str(exc)}))
-        proxy = str(body.get("proxy") or "").strip()
-        if proxy:
-            if not re.fullmatch(r"(socks5h?|https?)://\S+", proxy):
-                return self._send(400, json.dumps({"error": "proxy must be a socks5:// or http(s):// URL"}))
-            request["proxy"] = proxy
         try:
             result = self._unshackle(path, request)
         except (LookupError, OSError) as exc:
@@ -1143,56 +1191,12 @@ class H(BaseHTTPRequestHandler):
         title = str(body.get("title") or "").strip()
         if service not in UNSHACKLE_SERVICES or not title or len(title) > 2048:
             return self._send(400, json.dumps({"error": "pick a service and enter a title URL or ID"}))
-
-        def words(key):
-            value = body.get(key) or ""
-            value = " ".join(map(str, value)) if isinstance(value, list) else str(value)
-            return [w for w in re.split(r"[\s,]+", value.strip()) if w]
-
+        # The page builds the request like unshackle-ui's buildDownloadRequest; only known fields pass.
         try:
-            request = {"service": service, **self._service_values(service, body), "title_id": title}
+            request = {**_check_request(service, body.get("request") or {}, UNSHACKLE_FIELDS),
+                       "service": service, "title_id": title}
         except ValueError as exc:
             return self._send(400, json.dumps({"error": str(exc)}))
-        quality = str(body.get("quality") or "").strip()
-        if quality:
-            if not quality.isdigit():
-                return self._send(400, json.dumps({"error": "quality must be a height such as 2160"}))
-            request["quality"] = [int(quality)]
-        if words("range"):
-            request["range"] = words("range")
-        vbitrate = str(body.get("vbitrate") or "").strip()
-        if vbitrate:  # pins the exact rung picked from the track list (nearest match server side)
-            if not vbitrate.isdigit():
-                return self._send(400, json.dumps({"error": "vbitrate must be kbps"}))
-            request["vbitrate"] = int(vbitrate)
-        acodec = str(body.get("acodec") or "").strip()
-        if acodec:  # an audio quality variant picked in the track list, like unshackle-ui
-            if not re.fullmatch(r"[A-Za-z0-9_.+-]{2,16}", acodec):
-                return self._send(400, json.dumps({"error": "invalid acodec"}))
-            request["acodec"] = acodec
-            try:
-                if str(body.get("channels") or "").strip():
-                    request["channels"] = float(body["channels"])
-                if str(body.get("abitrate") or "").strip():
-                    request["abitrate"] = int(body["abitrate"])
-            except (TypeError, ValueError):
-                return self._send(400, json.dumps({"error": "channels / abitrate must be numbers"}))
-        if str(body.get("vcodec") or "").strip():
-            request["vcodec"] = str(body["vcodec"]).strip()
-        # No audio pick would mean unshackle's default (every dub), so require one; blank subs = none.
-        audio = words("a_lang")
-        if not audio:
-            return self._send(400, json.dumps({"error": "enter at least one audio language (e.g. en or orig)"}))
-        request["a_lang"] = audio
-        subs = words("s_lang")
-        request.update({"s_lang": subs, "sub_format": "SRT"} if subs else {"no_subs": True})
-        if words("wanted"):
-            request["wanted"] = words("wanted")
-        proxy = str(body.get("proxy") or "").strip()
-        if proxy:
-            if not re.fullmatch(r"(socks5h?|https?)://\S+", proxy):
-                return self._send(400, json.dumps({"error": "proxy must be a socks5:// or http(s):// URL"}))
-            request["proxy"] = proxy
 
         job = secrets.token_hex(8)
         config_path = os.path.join(JOBS_DIR, job + ".config.json")
@@ -1200,7 +1204,7 @@ class H(BaseHTTPRequestHandler):
         with open(config_path, "w", encoding="utf-8") as handle:
             json.dump({**request, "destination": os.path.join(DOWNLOADS_DIR, "unshackle")}, handle)
         with open(os.path.join(JOBS_DIR, job + ".meta.json"), "w", encoding="utf-8") as handle:
-            json.dump({"job": job, "kind": "unshackle", "body": body, "source": f"{service} {title}",
+            json.dump({"job": job, "kind": "unshackle", "body": body, "source": str(body.get("name") or "").strip()[:200] or f"{service} {title}",
                        "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}, handle)
         # The worker inherits UNSHACKLE_URL/KEY from this process; env_overrides would persist the key to disk.
         queue.submit(job, "download", [sys.executable, UNSHACKLE_PULL, config_path, state_path])

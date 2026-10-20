@@ -38,6 +38,8 @@ class FakeUnshackle:
             def do_GET(self):
                 if self.headers.get("X-Secret-Key") != "k":
                     return self._json(401, {"message": "bad key"})
+                if self.path == "/api/profiles":
+                    return self._json(200, {"profiles": {"DSNP": ["default", "kid"], "NF": ["x"]}})
                 if self.path == "/api/services":
                     return self._json(200, {"services": [{"tag": "DSNP", "has_search": True, "cli_params": [
                         {"name": "title", "kind": "argument"},
@@ -95,16 +97,16 @@ class UnshackleRouteTests(unittest.TestCase):
 
             try:
                 # Only services verified on unshackle 6.0 are offered (NF exists upstream but is hidden).
-                imax = {"name": "imax", "label": "imax", "help": "IMAX", "type": "bool", "choices": [], "default": False}
-                self.assertEqual(post("/api/unshackle/services", {}),
-                                 {"enabled": True, "services": ["AMZN", "DSNP"], "searchable": ["DSNP"],
-                                  "options": {"AMZN": [], "DSNP": [imax]}})
+                services = post("/api/unshackle/services", {})
+                self.assertEqual((services["services"], services["searchable"], services["profiles"]),
+                                 (["AMZN", "DSNP"], ["DSNP"], {"DSNP": ["default", "kid"]}))
+                self.assertEqual([p["name"] for p in services["params"]["DSNP"]], ["title", "imax"])  # raw cli_params
                 self.assertEqual(post("/api/unshackle/search", {"service": "DSNP", "query": "film"})["results"][0]["id"], "entity-1")
                 self.assertEqual(post("/api/unshackle/titles", {"service": "DSNP", "title": "entity-1"})["titles"][0]["name"], "Pilot")
                 post("/api/unshackle/tracks", {"service": "DSNP", "title": "entity-1", "wanted": "S01E01", "range": ["DV", "bogus"],
-                                               "proxy": "socks5://u:p@h:1", "svc": {"imax": True}})
-                self.assertEqual(fake.requests[-1], {"service": "DSNP", "imax": True, "title_id": "entity-1", "wanted": "S01E01",
-                                                     "range": ["DV"], "proxy": "socks5://u:p@h:1"})
+                                               "proxy": "socks5://u:p@h:1", "no_proxy": False, "profile": "kid", "svc": {"imax": True}})
+                self.assertEqual(fake.requests[-1], {"service": "DSNP", "imax": True, "profile": "kid", "proxy": "socks5://u:p@h:1",
+                                                     "title_id": "entity-1", "wanted": "S01E01", "range": ["DV"]})
                 with self.assertRaises(urllib.error.HTTPError) as unknown:  # only the service's own options pass
                     post("/api/unshackle/tracks", {"service": "DSNP", "title": "entity-1", "svc": {"output_dir": "/"}})
                 self.assertEqual(unknown.exception.code, 400)
@@ -115,22 +117,22 @@ class UnshackleRouteTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as hidden:
                     post("/api/unshackle/titles", {"service": "NF", "title": "1"})
                 self.assertEqual(hidden.exception.code, 400)
-                with self.assertRaises(urllib.error.HTTPError) as no_audio:  # blank audio would pull every dub
-                    post("/api/unshackle/download", {"service": "DSNP", "title": "entity-1", "a_lang": " "})
-                self.assertEqual(no_audio.exception.code, 400)
-                job = post("/api/unshackle/download", {"service": "DSNP", "title": "entity-1", "quality": "2160", "vbitrate": "16932",
-                                                       "range": ["DV"], "a_lang": ["en", "orig"], "s_lang": [],
-                                                       "wanted": ["S01E01", "S01E02"], "proxy": "socks5://u:p@h:1",
-                                                       "acodec": "EC3", "channels": "5.1", "abitrate": "768",
-                                                       "svc": {"imax": False}})["job"]
+                with self.assertRaises(urllib.error.HTTPError) as bad:  # every field is type-checked
+                    post("/api/unshackle/download", {"service": "DSNP", "title": "entity-1", "request": {"vbitrate": "lots"}})
+                self.assertEqual(bad.exception.code, 400)
+                with self.assertRaises(urllib.error.HTTPError) as escape:
+                    post("/api/unshackle/download", {"service": "DSNP", "title": "entity-1", "request": {"output_dir": "../x"}})
+                self.assertEqual(escape.exception.code, 400)
+                # The page sends unshackle-ui's buildDownloadRequest output as is.
+                request = {"wanted": ["S01E01", "S01E02"], "quality": [2160], "range": ["DV"], "a_lang": ["en"],
+                           "sub_format": "SRT", "vbitrate": 16932, "acodec": ["EC3"], "channels": 5.1, "abitrate": 768,
+                           "proxy": "socks5://u:p@h:1", "imax": True}
+                job = post("/api/unshackle/download", {"service": "DSNP", "title": "entity-1", "name": "Film", "request": request})["job"]
                 item = web.jobs[job]
                 self.assertEqual((item["lane"], item["command"][1]), ("download", web.UNSHACKLE_PULL))
                 self.assertEqual(item["env_overrides"], {})  # the key must not be persisted with the job
                 config = json.loads(Path(item["command"][2]).read_text())
-                self.assertEqual(config, {"service": "DSNP", "title_id": "entity-1", "quality": [2160], "range": ["DV"],
-                                          "vbitrate": 16932, "acodec": "EC3", "channels": 5.1, "abitrate": 768,
-                                          "a_lang": ["en", "orig"], "no_subs": True,
-                                          "wanted": ["S01E01", "S01E02"], "proxy": "socks5://u:p@h:1",
+                self.assertEqual(config, {**request, "service": "DSNP", "title_id": "entity-1",
                                           "destination": os.path.join(web.DOWNLOADS_DIR, "unshackle")})
                 # A queued job may wait paused; a running one cannot (stopping the worker would not stop unshackle).
                 with self.assertRaises(RuntimeError):

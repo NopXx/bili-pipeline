@@ -1,10 +1,10 @@
 const { createApp } = Vue
 const { GROUP, FILTERS } = Shared
 
-const UNSHACKLE_DEFAULTS = { service: '', proxy: '', svc: {} }
 const BILI_DEFAULTS = { quality: 'auto', codec: 'auto', audio_quality: 'auto', container: 'mp4', subtitle: false, redownload: false }
 
 createApp({
+  mixins: [UnshackleMixin],
   data() { return {
     token: localStorage.getItem('bwt') || '', tokenDraft: '', editingToken: false,
     online: true, tokenInvalid: false, lastError: '', health: null,
@@ -13,13 +13,6 @@ createApp({
     inspectionJob: '', inspectionPending: false,
     biliUrl: '', episodes: [], selectedEpisodes: [], parsing: false,
     biliOptions: { ...BILI_DEFAULTS, ...Shared.load('bili-options', {}), redownload: false },
-    // options persist per browser; title and episodes are per job.
-    // Same flow as unshackle-ui: search/open -> episodes -> tracks -> pick -> queue.
-    un: { enabled: null, services: [], searchable: [], serviceOptions: {}, input: '', busy: '', results: [], titleId: '',
-      titles: [], selected: [], tracks: null, video: '', audio: [], subs: [], filter: { height: '', range: '', codec: '' },
-      audioQuick: 'rec', subQuick: 'rec', audioSearch: '', subSearch: '', audioPick: '',
-      options: { ...UNSHACKLE_DEFAULTS, ...Shared.load('unshackle-options', {}) } },
-    unLoadSeq: 0,
     BILI_QUALITIES: Shared.BILI_QUALITIES, BILI_CODECS: Shared.BILI_CODECS, BILI_AUDIO: Shared.BILI_AUDIO,
     files: [], selectedFiles: [], fileSearch: '', fileSort: 'size', filesLoadedAt: 0, uploads: [],
     jobs: [], jobFilter: 'all', laneFilter: 'all', jobSearch: '', logJob: '',
@@ -66,94 +59,11 @@ createApp({
     },
     logJobRow() { return this.jobs.find(job => job.job === this.logJob) },
     biliOptionHint() { return Shared.biliOptionHint(this.biliOptions) },
-    unCanSearch() { return this.un.searchable.includes(this.un.options.service) },
-    // A URL, or one token with a digit/dash (entity-…, B0…, uuid), is opened; anything else is searched.
-    unLooksLikeId() {
-      const value = this.un.input.trim()
-      return !this.unCanSearch || value.includes('://') || (!/\s/.test(value) && /[0-9-]/.test(value) && value.length >= 8)
-    },
-    unEpisodic() { return this.un.titles.some(t => t.season != null && t.number != null) },
-    unAllVideos() {
-      return [...(this.un.tracks?.video || [])].sort((a, b) => (b.height - a.height) || ((b.bitrate || 0) - (a.bitrate || 0)))
-    },
-    unVideos() {
-      const f = this.un.filter
-      return this.unAllVideos.filter(v => (!f.height || v.height === Number(f.height)) && (!f.range || v.range === f.range) &&
-        (!f.codec || (v.codec_display || v.codec) === f.codec))
-    },
-    unHeights() { return [...new Set(this.unAllVideos.map(v => v.height))] },
-    unRanges() { return [...new Set(this.unAllVideos.map(v => v.range))] },
-    unCodecs() { return [...new Set(this.unAllVideos.map(v => v.codec_display || v.codec))] },
-    unTitleLabel() {
-      const first = this.un.titles[0] || {}
-      return this.unEpisodic ? `${first.series_title || first.name} · tracks ของ ${this.un.selected[0] || ''}` : `${first.name || ''}${first.year ? ` (${first.year})` : ''}`
-    },
-    unPickLabel() {
-      const v = this.unAllVideos.find(item => item.id === this.un.video)
-      const audio = this.unAudioPicked ? this.unAudioLabel(this.unAudioPicked, true) : 'Auto'
-      return v ? `${v.width}×${v.height} ${v.range} · เสียง ${this.un.audio.join(', ') || '-'} (${audio}) · ซับ ${this.un.subs.length ? this.un.subs.join(', ') + ' (SRT)' : 'ไม่เอา'}` : 'เลือกวิดีโอ'
-    },
-    unAudioLangs() {
-      // One row per language showing its best track (Atmos, then channels, then bitrate), like unshackle-ui.
-      const best = new Map()
-      for (const a of this.un.tracks?.audio || []) {
-        if (!a.language) continue
-        const cur = best.get(a.language)
-        if (!cur || (a.atmos - cur.atmos || (a.channels || 0) - (cur.channels || 0) || (a.bitrate || 0) - (cur.bitrate || 0)) > 0) best.set(a.language, a)
-      }
-      const orig = new Set((this.un.tracks?.audio || []).filter(a => a.is_original || a.is_original_lang).map(a => a.language))
-      return [...best.values()].map(a => ({ code: a.language, orig: orig.has(a.language), atmos: !!a.atmos, detail: this.unAudioLabel(a, true) }))
-        .sort((a, b) => (b.orig - a.orig) || a.code.localeCompare(b.code))
-    },
-    // Distinct quality variants across languages, best first; picking one pins acodec/channels/abitrate.
-    unAudioLadder() {
-      const seen = new Map()
-      for (const a of this.un.tracks?.audio || []) {
-        const key = this.unAudioKey(a)
-        if (!seen.has(key)) seen.set(key, a)
-      }
-      return [...seen.values()].sort((a, b) => (b.atmos - a.atmos) || ((b.channels || 0) - (a.channels || 0)) || ((b.bitrate || 0) - (a.bitrate || 0)))
-    },
-    unSubLangs() {
-      const langs = new Map()
-      for (const t of this.un.tracks?.subtitles || []) {
-        if (!t.language) continue
-        const lang = langs.get(t.language) || { code: t.language, forced: false, sdh: false, kinds: new Set(), formats: new Set() }
-        lang.formats.add(t.codec_display || t.codec || '?')
-        lang.forced ||= !!t.forced
-        lang.sdh ||= !!(t.sdh || t.cc)
-        lang.kinds.add(t.forced ? 'Forced' : (t.sdh || t.cc) ? 'SDH' : 'ปกติ')
-        langs.set(t.language, lang)
-      }
-      return [...langs.values()].map(l => ({ ...l, detail: `${[...l.kinds].join(' · ')} · ${[...l.formats].join('/')} → SRT` }))
-        .sort((a, b) => a.code.localeCompare(b.code))
-    },
-    // Same filters as unshackle-ui: "แนะนำ" = original + English + Thai (+ whatever is already picked).
-    unRecommended() {
-      const orig = this.unAudioLangs.filter(l => l.orig).map(l => l.code.split('-')[0])
-      return code => ['en', 'th', ...orig].includes(code.split('-')[0])
-    },
-    unAudioPicked() { return this.unAudioLadder.find(a => this.unAudioKey(a) === this.un.audioPick) || null },
-    unAudioRows() {
-      const q = this.un.audioSearch.trim().toLowerCase(), base = c => c.split('-')[0]
-      return this.unAudioLangs.filter(l =>
-        (this.un.audioQuick !== 'rec' || l.orig || this.un.audio.includes(l.code) || this.unRecommended(l.code)) &&
-        (this.un.audioQuick !== 'th' || base(l.code) === 'th') && (this.un.audioQuick !== 'en' || base(l.code) === 'en') &&
-        (this.un.audioQuick !== 'atmos' || l.atmos) && (!q || `${l.code} ${l.detail}`.toLowerCase().includes(q)))
-    },
-    unSubRows() {
-      const q = this.un.subSearch.trim().toLowerCase(), base = c => c.split('-')[0]
-      return this.unSubLangs.filter(l =>
-        (this.un.subQuick !== 'rec' || this.un.subs.includes(l.code) || this.unRecommended(l.code)) &&
-        (this.un.subQuick !== 'th' || base(l.code) === 'th') && (this.un.subQuick !== 'en' || base(l.code) === 'en') &&
-        (this.un.subQuick !== 'forced' || l.forced) && (this.un.subQuick !== 'sdh' || l.sdh) && (!q || l.code.toLowerCase().includes(q)))
-    },
   },
   watch: {
     view(value) { if (value === 'files') this.loadFiles() },
     torrentSource() { this.resetTorrent() },
     biliOptions: { deep: true, handler(value) { Shared.save('bili-options', { ...value, redownload: false }) } },
-    'un.options': { deep: true, handler(value) { Shared.save('unshackle-options', value) } },
     source(value) { if (value === 'unshackle' && this.un.enabled === null) this.loadUnshackleServices() },
   },
   methods: {
@@ -265,108 +175,6 @@ createApp({
       try {
         this.queued((await this.api('/api/pull', { url: this.biliUrl.trim(), episode_ids: this.selectedEpisodes, ...this.biliOptions })).job)
         this.episodes = []; this.selectedEpisodes = []
-      } catch (error) { this.fail(error) }
-    },
-    async loadUnshackleServices() {
-      try {
-        const result = await this.api('/api/unshackle/services')
-        Object.assign(this.un, { enabled: result.enabled, services: result.services, searchable: result.searchable || [],
-          serviceOptions: result.options || {} })
-        // Saved values per service, filled with each option's default so the control shows it.
-        const saved = this.un.options.svc ||= {}
-        for (const [service, options] of Object.entries(this.un.serviceOptions)) {
-          const values = saved[service] ||= {}
-          for (const o of options) if (!(o.name in values)) values[o.name] = o.type === 'bool' ? !!o.default : String(o.default ?? '')
-        }
-        if (result.services.length && !result.services.includes(this.un.options.service)) this.un.options.service = result.services[0]
-      } catch (error) { this.fail(error) }
-    },
-    unAudioKey(a) { return `${a.codec}-${a.channels}-${a.atmos}-${a.bitrate}` },
-    // kbps, not Mbps: audio rungs differ by a few kbps (66 vs 71) and would round to the same label.
-    unAudioLabel(a, withBitrate) {
-      const ch = a.channels == null ? '' : ({ 6: '5.1', 8: '7.1' }[Math.round(a.channels)] || Number(a.channels).toFixed(1)) + 'ch'
-      return [a.codec_display || a.codec, ch, withBitrate && a.bitrate ? `${Math.round(a.bitrate)} kbps` : ''].filter(Boolean).join(' · ')
-    },
-    unCode(t) { return t.season == null || t.number == null ? '' : `S${String(t.season).padStart(2, '0')}E${String(t.number).padStart(2, '0')}` },
-    unReset() { Object.assign(this.un, { results: [], titleId: '', titles: [], selected: [], tracks: null, video: '', audio: [], subs: [] }) },
-    async unCall(busy, route, body) {
-      this.un.busy = busy
-      try { return await this.api(route, { ...this.unBase(), ...body }) }
-      finally { this.un.busy = '' }
-    },
-    // Service, proxy and the service's own options (e.g. DSNP --imax), sent with every unshackle call
-    // like unshackle-ui does: the tracks listed must match what the download resolves.
-    unBase() {
-      const service = this.un.options.service
-      return { service, proxy: this.un.options.proxy, svc: this.un.options.svc[service] || {} }
-    },
-    unGo() { return this.unLooksLikeId ? this.unOpen(this.un.input.trim()) : this.unSearch() },
-    async unSearch() {
-      this.unReset()
-      try { this.un.results = (await this.unCall('search', '/api/unshackle/search', { query: this.un.input.trim() })).results || [] }
-      catch (error) { this.fail(error) }
-    },
-    async unOpen(title) {
-      const results = this.un.results
-      this.unReset()
-      try {
-        const titles = (await this.unCall('open', '/api/unshackle/titles', { title })).titles || []
-        Object.assign(this.un, { titleId: title, titles, selected: titles.map(this.unCode).filter(Boolean) })
-      } catch (error) { this.un.results = results; this.fail(error) }
-    },
-    async unLoadTracks() {
-      const wanted = this.unEpisodic ? this.un.selected[0] : ''
-      const body = { title: this.un.titleId, wanted }
-      Object.assign(this.un, { tracks: null, video: '', audio: [], subs: [], audioPick: '', filter: { height: '', range: '', codec: '' } })
-      this.view = 'tracks'
-      // A newer load (another episode/title) must win over a slow one still in flight. Compare a
-      // counter, not objects: Vue hands back a reactive proxy, never the object that was assigned.
-      const load = ++this.unLoadSeq
-      try {
-        const tracks = await this.unCall('tracks', '/api/unshackle/tracks', body)
-        if (load !== this.unLoadSeq) return
-        tracks.video = tracks.video || []
-        this.un.tracks = tracks
-        this.unPickDefaults()
-        // Like unshackle-ui there is no range to choose. Most services list every range at once; AMZN
-        // fetches one manifest per range, so when only SDR came back, fetch HDR10 and DV too and merge.
-        if (tracks.video.length && tracks.video.every(v => v.range === 'SDR')) {
-          this.un.busy = 'more'
-          const extra = await Promise.allSettled(['HDR10', 'DV'].map(range =>
-            this.api('/api/unshackle/tracks', { ...this.unBase(), ...body, range: [range] })))
-          if (load !== this.unLoadSeq) return
-          this.un.busy = ''
-          const video = this.un.tracks.video  // the reactive array, so the table updates
-          const seen = new Set(video.map(v => v.id))
-          for (const result of extra) {
-            for (const v of result.status === 'fulfilled' ? result.value.video || [] : []) {
-              if (!seen.has(v.id)) { seen.add(v.id); video.push(v) }
-            }
-          }
-          this.unPickDefaults()
-        }
-      } catch (error) { this.fail(error) }
-    },
-    unPickDefaults() {
-      // Best rung by default (highest resolution, then bitrate), original-language audio, no subtitles.
-      this.un.video = this.unAllVideos[0]?.id || ''
-      if (!this.un.audio.length) {
-        const orig = this.unAudioLangs.filter(l => l.orig).map(l => l.code)
-        this.un.audio = orig.length ? orig : this.unAudioLangs.filter(l => l.code.startsWith('en')).slice(0, 1).map(l => l.code)
-      }
-    },
-    async unSubmit() {
-      const v = this.unAllVideos.find(item => item.id === this.un.video)
-      if (!v) return
-      try {
-        const job = (await this.unCall('submit', '/api/unshackle/download', {
-          title: this.un.titleId, wanted: this.unEpisodic ? this.un.selected : [],
-          quality: String(v.height), vbitrate: String(v.bitrate || ''), range: [v.range],
-          a_lang: this.un.audio, s_lang: this.un.subs,
-          ...(this.unAudioPicked ? { acodec: this.unAudioPicked.codec, channels: String(this.unAudioPicked.channels ?? ''),
-            abitrate: String(this.unAudioPicked.bitrate ?? '') } : {}),
-        })).job
-        this.queued(job)
       } catch (error) { this.fail(error) }
     },
     queued(job) {
