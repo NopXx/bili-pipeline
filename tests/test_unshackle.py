@@ -39,7 +39,9 @@ class FakeUnshackle:
                 if self.headers.get("X-Secret-Key") != "k":
                     return self._json(401, {"message": "bad key"})
                 if self.path == "/api/services":
-                    return self._json(200, {"services": [{"tag": "DSNP", "has_search": True}, {"tag": "AMZN"}, {"tag": "NF"}]})
+                    return self._json(200, {"services": [{"tag": "DSNP", "has_search": True, "cli_params": [
+                        {"name": "title", "kind": "argument"},
+                        {"name": "imax", "kind": "option", "opts": ["-i", "--imax"], "is_flag": True, "default": False, "help": "IMAX"}]}, {"tag": "AMZN"}, {"tag": "NF"}]})
                 fake.polls += 1
                 if fake.polls < 2:
                     return self._json(200, {"status": "downloading", "progress": 42.5, "phase": "downloading video", "speed": "9 MB/s"})
@@ -93,14 +95,19 @@ class UnshackleRouteTests(unittest.TestCase):
 
             try:
                 # Only services verified on unshackle 6.0 are offered (NF exists upstream but is hidden).
+                imax = {"name": "imax", "label": "imax", "help": "IMAX", "type": "bool", "choices": [], "default": False}
                 self.assertEqual(post("/api/unshackle/services", {}),
-                                 {"enabled": True, "services": ["AMZN", "DSNP"], "searchable": ["DSNP"]})
+                                 {"enabled": True, "services": ["AMZN", "DSNP"], "searchable": ["DSNP"],
+                                  "options": {"AMZN": [], "DSNP": [imax]}})
                 self.assertEqual(post("/api/unshackle/search", {"service": "DSNP", "query": "film"})["results"][0]["id"], "entity-1")
                 self.assertEqual(post("/api/unshackle/titles", {"service": "DSNP", "title": "entity-1"})["titles"][0]["name"], "Pilot")
                 post("/api/unshackle/tracks", {"service": "DSNP", "title": "entity-1", "wanted": "S01E01", "range": ["DV", "bogus"],
-                                               "proxy": "socks5://u:p@h:1"})
-                self.assertEqual(fake.requests[-1], {"service": "DSNP", "title_id": "entity-1", "wanted": "S01E01",
+                                               "proxy": "socks5://u:p@h:1", "svc": {"imax": True}})
+                self.assertEqual(fake.requests[-1], {"service": "DSNP", "imax": True, "title_id": "entity-1", "wanted": "S01E01",
                                                      "range": ["DV"], "proxy": "socks5://u:p@h:1"})
+                with self.assertRaises(urllib.error.HTTPError) as unknown:  # only the service's own options pass
+                    post("/api/unshackle/tracks", {"service": "DSNP", "title": "entity-1", "svc": {"output_dir": "/"}})
+                self.assertEqual(unknown.exception.code, 400)
                 with self.assertRaises(urllib.error.HTTPError) as missing:  # unshackle's message reaches the UI
                     post("/api/unshackle/tracks", {"service": "DSNP", "title": "bad"})
                 self.assertEqual(missing.exception.code, 424)  # 5xx bodies get replaced by Cloudflare
@@ -114,7 +121,8 @@ class UnshackleRouteTests(unittest.TestCase):
                 job = post("/api/unshackle/download", {"service": "DSNP", "title": "entity-1", "quality": "2160", "vbitrate": "16932",
                                                        "range": ["DV"], "a_lang": ["en", "orig"], "s_lang": [],
                                                        "wanted": ["S01E01", "S01E02"], "proxy": "socks5://u:p@h:1",
-                                                       "acodec": "EC3", "channels": "5.1", "abitrate": "768"})["job"]
+                                                       "acodec": "EC3", "channels": "5.1", "abitrate": "768",
+                                                       "svc": {"imax": False}})["job"]
                 item = web.jobs[job]
                 self.assertEqual((item["lane"], item["command"][1]), ("download", web.UNSHACKLE_PULL))
                 self.assertEqual(item["env_overrides"], {})  # the key must not be persisted with the job

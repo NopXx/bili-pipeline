@@ -54,6 +54,31 @@ UNSHACKLE_URL = os.environ.get("UNSHACKLE_URL", "").rstrip("/")
 UNSHACKLE_KEY = os.environ.get("UNSHACKLE_KEY", "")
 # Services verified end to end through unshackle 6.0 (list, download, decrypt, mux); others stay hidden.
 UNSHACKLE_SERVICES = tuple(s for s in os.environ.get("UNSHACKLE_SERVICES", "AMZN,DSNP,HMAX").split(",") if s)
+_UNSHACKLE_CATALOG = {}
+
+
+def _unshackle_services(refresh=False):
+    """unshackle's /api/services by tag, cached; the options it lists only change when unshackle does."""
+    if refresh or not _UNSHACKLE_CATALOG:
+        request = urllib.request.Request(UNSHACKLE_URL + "/api/services", headers={"X-Secret-Key": UNSHACKLE_KEY})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            services = json.load(response).get("services") or []
+        _UNSHACKLE_CATALOG.clear()
+        _UNSHACKLE_CATALOG.update({s.get("tag"): s for s in services})
+    return _UNSHACKLE_CATALOG
+
+
+def _service_options(service):
+    """A service's own CLI options (cli_params of kind "option") as simple form fields, like unshackle-ui."""
+    fields = []
+    for param in service.get("cli_params") or []:
+        if param.get("kind") != "option" or param.get("multiple"):
+            continue
+        label = next((o[2:] for o in param.get("opts") or [] if o.startswith("--")), param["name"])
+        fields.append({"name": param["name"], "label": label, "help": param.get("help") or "",
+                       "type": "bool" if param.get("is_flag") else "text", "choices": param.get("choices") or [],
+                       "default": param.get("default") if param.get("default") is not None else ""})
+    return fields
 JOBS_DIR = os.path.realpath(os.environ.get("BILI_JOBS_DIR", os.path.join(HERE, "jobs")))
 DOWNLOADS_DIR = os.path.realpath(os.environ.get("BILI_DOWNLOADS_DIR", "/opt/bili-downloads"))
 TORRENT_DOWNLOADS_DIR = os.path.realpath(os.path.join(DOWNLOADS_DIR, "torrents"))
@@ -1016,16 +1041,38 @@ class H(BaseHTTPRequestHandler):
         del body
         if not UNSHACKLE_URL:
             return self._send(200, json.dumps({"enabled": False, "services": []}))
-        request = urllib.request.Request(UNSHACKLE_URL + "/api/services", headers={"X-Secret-Key": UNSHACKLE_KEY})
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                services = json.load(response).get("services") or []
+            available = _unshackle_services(refresh=True)
         except (OSError, ValueError) as exc:
             return self._send(424, json.dumps({"error": f"unshackle unreachable: {exc}"}))
-        available = {s.get("tag"): s for s in services}
         tested = [tag for tag in UNSHACKLE_SERVICES if tag in available]
         self._send(200, json.dumps({"enabled": True, "services": tested,
-                                    "searchable": [tag for tag in tested if available[tag].get("has_search")]}))
+                                    "searchable": [tag for tag in tested if available[tag].get("has_search")],
+                                    "options": {tag: _service_options(available[tag]) for tag in tested}}))
+
+    def _service_values(self, service, body):
+        """The service's own options (e.g. DSNP --imax) from body["svc"], checked against its cli_params."""
+        values = body.get("svc") or {}
+        if not isinstance(values, dict) or not values:
+            return {}
+        try:
+            allowed = {o["name"]: o for o in _service_options(_unshackle_services().get(service) or {})}
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"unshackle unreachable: {exc}") from None
+        out = {}
+        for key, value in values.items():
+            option = allowed.get(key)
+            if option is None:
+                raise ValueError(f"unknown {service} option: {key}")
+            if option["type"] == "bool":
+                if value is True:
+                    out[key] = True
+            elif str(value).strip():
+                value = str(value).strip()[:200]
+                if option["choices"] and value not in option["choices"]:
+                    raise ValueError(f"{key} must be one of {', '.join(option['choices'])}")
+                out[key] = value
+        return out
 
     def _unshackle(self, path, request):
         """POST to unshackle and return its JSON; an unshackle error becomes a 4xx/5xx for the browser."""
@@ -1048,7 +1095,10 @@ class H(BaseHTTPRequestHandler):
         service = str(body.get("service") or "").strip()
         if service not in UNSHACKLE_SERVICES:
             return self._send(400, json.dumps({"error": "unsupported service"}))
-        request = {"service": service, **extra}
+        try:
+            request = {"service": service, **self._service_values(service, body), **extra}
+        except ValueError as exc:
+            return self._send(400, json.dumps({"error": str(exc)}))
         proxy = str(body.get("proxy") or "").strip()
         if proxy:
             if not re.fullmatch(r"(socks5h?|https?)://\S+", proxy):
@@ -1099,7 +1149,10 @@ class H(BaseHTTPRequestHandler):
             value = " ".join(map(str, value)) if isinstance(value, list) else str(value)
             return [w for w in re.split(r"[\s,]+", value.strip()) if w]
 
-        request = {"service": service, "title_id": title}
+        try:
+            request = {"service": service, **self._service_values(service, body), "title_id": title}
+        except ValueError as exc:
+            return self._send(400, json.dumps({"error": str(exc)}))
         quality = str(body.get("quality") or "").strip()
         if quality:
             if not quality.isdigit():

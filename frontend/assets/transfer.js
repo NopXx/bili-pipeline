@@ -1,7 +1,7 @@
 const { createApp } = Vue
 const { GROUP, FILTERS } = Shared
 
-const UNSHACKLE_DEFAULTS = { service: '', proxy: '' }
+const UNSHACKLE_DEFAULTS = { service: '', proxy: '', svc: {} }
 const BILI_DEFAULTS = { quality: 'auto', codec: 'auto', audio_quality: 'auto', container: 'mp4', subtitle: false, redownload: false }
 
 createApp({
@@ -15,7 +15,7 @@ createApp({
     biliOptions: { ...BILI_DEFAULTS, ...Shared.load('bili-options', {}), redownload: false },
     // options persist per browser; title and episodes are per job.
     // Same flow as unshackle-ui: search/open -> episodes -> tracks -> pick -> queue.
-    un: { enabled: null, services: [], searchable: [], input: '', busy: '', results: [], titleId: '',
+    un: { enabled: null, services: [], searchable: [], serviceOptions: {}, input: '', busy: '', results: [], titleId: '',
       titles: [], selected: [], tracks: null, video: '', audio: [], subs: [], filter: { height: '', range: '', codec: '' },
       audioQuick: 'rec', subQuick: 'rec', audioSearch: '', subSearch: '', audioPick: '',
       options: { ...UNSHACKLE_DEFAULTS, ...Shared.load('unshackle-options', {}) } },
@@ -270,7 +270,14 @@ createApp({
     async loadUnshackleServices() {
       try {
         const result = await this.api('/api/unshackle/services')
-        Object.assign(this.un, { enabled: result.enabled, services: result.services, searchable: result.searchable || [] })
+        Object.assign(this.un, { enabled: result.enabled, services: result.services, searchable: result.searchable || [],
+          serviceOptions: result.options || {} })
+        // Saved values per service, filled with each option's default so the control shows it.
+        const saved = this.un.options.svc ||= {}
+        for (const [service, options] of Object.entries(this.un.serviceOptions)) {
+          const values = saved[service] ||= {}
+          for (const o of options) if (!(o.name in values)) values[o.name] = o.type === 'bool' ? !!o.default : String(o.default ?? '')
+        }
         if (result.services.length && !result.services.includes(this.un.options.service)) this.un.options.service = result.services[0]
       } catch (error) { this.fail(error) }
     },
@@ -284,8 +291,14 @@ createApp({
     unReset() { Object.assign(this.un, { results: [], titleId: '', titles: [], selected: [], tracks: null, video: '', audio: [], subs: [] }) },
     async unCall(busy, route, body) {
       this.un.busy = busy
-      try { return await this.api(route, { service: this.un.options.service, proxy: this.un.options.proxy, ...body }) }
+      try { return await this.api(route, { ...this.unBase(), ...body }) }
       finally { this.un.busy = '' }
+    },
+    // Service, proxy and the service's own options (e.g. DSNP --imax), sent with every unshackle call
+    // like unshackle-ui does: the tracks listed must match what the download resolves.
+    unBase() {
+      const service = this.un.options.service
+      return { service, proxy: this.un.options.proxy, svc: this.un.options.svc[service] || {} }
     },
     unGo() { return this.unLooksLikeId ? this.unOpen(this.un.input.trim()) : this.unSearch() },
     async unSearch() {
@@ -320,7 +333,7 @@ createApp({
         if (tracks.video.length && tracks.video.every(v => v.range === 'SDR')) {
           this.un.busy = 'more'
           const extra = await Promise.allSettled(['HDR10', 'DV'].map(range =>
-            this.api('/api/unshackle/tracks', { service: this.un.options.service, proxy: this.un.options.proxy, ...body, range: [range] })))
+            this.api('/api/unshackle/tracks', { ...this.unBase(), ...body, range: [range] })))
           if (load !== this.unLoadSeq) return
           this.un.busy = ''
           const video = this.un.tracks.video  // the reactive array, so the table updates

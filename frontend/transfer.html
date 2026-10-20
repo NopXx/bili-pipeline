@@ -96,6 +96,15 @@
             </label>
             <label class="field"><span>Proxy</span><input v-model="un.options.proxy" placeholder="socks5://user:pass@host:port"></label>
           </div>
+          <div class="options" v-if="(un.serviceOptions[un.options.service] || []).length && un.options.svc[un.options.service]">
+            <template v-for="o in un.serviceOptions[un.options.service]" :key="o.name">
+              <label class="check" v-if="o.type === 'bool'" :title="o.help"><input type="checkbox" v-model="un.options.svc[un.options.service][o.name]" @change="unReset()"> {{o.label}}</label>
+              <label class="field" v-else :title="o.help"><span>{{o.label}}</span>
+                <select v-if="o.choices.length" v-model="un.options.svc[un.options.service][o.name]" @change="unReset()"><option v-for="c in o.choices" :key="c" :value="c">{{c}}</option></select>
+                <input v-else v-model="un.options.svc[un.options.service][o.name]" :placeholder="o.help">
+              </label>
+            </template>
+          </div>
           <label class="field">
             <span>{{unCanSearch ? 'ค้นหา หรือวาง URL / Title ID' : 'URL หรือ Title ID'}}</span>
             <input v-model="un.input" placeholder="https://… หรือชื่อเรื่อง" @keyup.enter="unGo">
