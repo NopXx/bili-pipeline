@@ -197,7 +197,7 @@ def enqueue_upload(paths, kind, keep_local=False, parent_job=None, remove_source
 
 HLS_OPTION_KEYS = {
     "copy_video", "reencode", "ladder", "auto_hdr", "preserve_hdr",
-    "ladder_heights", "ladder_bitrates", "height", "video_bitrate",
+    "ladder_heights", "ladder_bitrates", "hdr_bitrate", "height", "video_bitrate",
     "audio_channels", "audio_bitrate", "segment_seconds", "poster_seconds",
     "gpu_tonemap", "copy_audio", "upload", "keep_local",
 }

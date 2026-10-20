@@ -4,7 +4,9 @@ const { GROUP, FILTERS, ACTIVE } = Shared
 // --- HLS profile ---------------------------------------------------------------
 const HLS_DEFAULTS = {
   mode: 'copy', height: 1080, videoBitrate: '8M', gpuTonemap: true, autoBitrate: true,
-  rungs: [{ h: 'raw', on: false, rate: '' }, { h: 2160, on: true, rate: '16M' }, { h: 1440, on: true, rate: '10M' },
+  // 'hdr' re-encodes the source resolution to HEVC Main 10 HDR10 at its own bitrate (Dolby Vision is
+  // dropped); 'raw' copies the source untouched. Number rungs are H.264 SDR (tonemapped from HDR).
+  rungs: [{ h: 'raw', on: false, rate: '' }, { h: 'hdr', on: false, rate: '6M' }, { h: 2160, on: true, rate: '16M' }, { h: 1440, on: true, rate: '10M' },
     { h: 1080, on: true, rate: '8M' }, { h: 720, on: false, rate: '4M' }, { h: 480, on: false, rate: '2M' }],
   audio: ['2', 'raw'], audioBitrate: 'auto', segment: 6, poster: 5, upload: true, keepLocal: false,
 }
@@ -15,14 +17,26 @@ const HLS_MODES = [
 ]
 
 // The request body /api/process and /api/remote/queue expect.
+const isHeight = r => typeof r.h === 'number'
+const HDR_RUNG = { h: 'hdr', on: false, rate: '6M' }
+
+// Profiles saved before the 'hdr' rung existed lack it; slot it in after 'raw'.
+function withHdrRung(config) {
+  if (!config.rungs.some(r => r.h === 'hdr')) config.rungs.splice(1, 0, { ...HDR_RUNG })
+  return config
+}
+
 function hlsProfile(c) {
   const rungs = c.rungs.filter(r => r.on)
+  const hdr = rungs.find(r => r.h === 'hdr')
   return {
     copy_video: c.mode === 'copy', reencode: c.mode === 'encode', auto_hdr: c.mode === 'hdr_auto',
     preserve_hdr: c.mode === 'preserve', height: c.mode === 'encode' ? +c.height : 0, ladder: c.mode === 'ladder',
     ladder_heights: rungs.map(r => r.h).join(','),
     // 'auto' lets the engine cap each rung at that file's own source bitrate.
-    ladder_bitrates: rungs.filter(r => r.h !== 'raw').map(r => `${r.h}:${c.autoBitrate ? 'auto' : r.rate}`).join(','),
+    ladder_bitrates: rungs.filter(isHeight).map(r => `${r.h}:${c.autoBitrate ? 'auto' : r.rate}`).join(','),
+    // The HDR rung always uses its own bitrate: auto would cap it at the source, defeating the point.
+    hdr_bitrate: c.mode === 'ladder' && hdr ? hdr.rate : '',
     video_bitrate: c.videoBitrate, audio_channels: c.audio.join(','), audio_bitrate: c.audioBitrate,
     segment_seconds: +c.segment, poster_seconds: +c.poster, gpu_tonemap: c.gpuTonemap || c.mode === 'hdr_auto',
     copy_audio: c.audio.includes('raw'), upload: c.upload, keep_local: c.keepLocal,
@@ -48,8 +62,9 @@ const HlsConfig = {
         if (c.mode === 'copy') video = this.sourceRate(m)
         else if (c.mode === 'encode' || c.mode === 'preserve') video = this.rate(c.videoBitrate)
         else if (c.mode === 'hdr_auto') video = this.sourceRate(m) + this.rate(this.suggested(1080, m)) + this.rate(this.suggested(720, m))
-        else video = c.rungs.filter(r => r.on && r.h !== 'raw' && +r.h <= this.maxHeight).reduce((n, r) => n + this.rate(c.autoBitrate ? this.suggested(r.h, m) : r.rate), 0) +
-          (c.rungs.some(r => r.on && r.h === 'raw') ? this.sourceRate(m) : 0)
+        else video = c.rungs.filter(r => r.on && isHeight(r) && r.h <= this.maxHeight).reduce((n, r) => n + this.rate(c.autoBitrate ? this.suggested(r.h, m) : r.rate), 0) +
+          (c.rungs.some(r => r.on && r.h === 'raw') ? this.sourceRate(m) : 0) +
+          (this.hasHdr ? c.rungs.filter(r => r.on && r.h === 'hdr').reduce((n, r) => n + this.rate(r.rate), 0) : 0)
         const audio = c.audio.reduce((n, a) => n + (a === 'raw' ? m.audio.reduce((s, x) => s + (+x.bit_rate || 640000), 0) : this.audioRate(+a) * m.audio.length), 0)
         total += (video + audio) * (+m.duration || 0) / 8
       }
@@ -84,13 +99,17 @@ const HlsConfig = {
     },
     configureFromProbe() {
       if (!this.probe.length) return
-      for (const r of this.config.rungs) if (r.h !== 'raw') { r.on = r.on && +r.h <= this.maxHeight; r.rate = this.suggested(+r.h) }
-      if (!this.config.rungs.some(r => r.on && r.h !== 'raw')) for (const r of this.config.rungs) if (r.h !== 'raw' && +r.h <= this.maxHeight && +r.h >= 720) r.on = true
+      for (const r of this.config.rungs) if (isHeight(r)) { r.on = r.on && r.h <= this.maxHeight; r.rate = this.suggested(r.h) }
+      for (const r of this.config.rungs) if (r.h === 'hdr' && !this.hasHdr) r.on = false
+      if (!this.config.rungs.some(r => r.on && isHeight(r))) for (const r of this.config.rungs) if (isHeight(r) && r.h <= this.maxHeight && r.h >= 720) r.on = true
       const target = this.availableHeights[0] || 0
       this.config.height = target
       this.config.videoBitrate = this.suggested(target || this.maxHeight)
       if (!this.hasHdr && ['hdr_auto', 'preserve'].includes(this.config.mode)) this.config.mode = 'copy'
     },
+    isHeight,
+    // A height above the source, or the HDR rung for a source that is not HDR (unknown = allowed).
+    rungOff(r) { return isHeight(r) ? r.h > this.maxHeight : r.h === 'hdr' && this.probe.length > 0 && !this.hasHdr },
     modeDisabled(mode) { return (mode === 'hdr_auto' && !this.hasHevcHdr) || (mode === 'preserve' && !this.hasHdr) },
     setMode(mode) {
       if (this.modeDisabled(mode)) return
@@ -129,11 +148,12 @@ const HlsConfig = {
           <input type="checkbox" v-model="config.autoBitrate"> bitrate อัตโนมัติ: ไม่เกินต้นฉบับ คำนวณแยกทีละไฟล์
         </label>
         <div class="rungs" v-if="config.mode === 'ladder'">
-          <label class="rung" v-for="r in config.rungs" :key="r.h" :class="{off: r.h !== 'raw' && +r.h > maxHeight}">
-            <input type="checkbox" v-model="r.on" :disabled="r.h !== 'raw' && +r.h > maxHeight">
-            <span>{{r.h === 'raw' ? 'ต้นฉบับ (raw)' : r.h + 'p'}}</span>
-            <span v-if="r.h !== 'raw' && config.autoBitrate" class="auto-rate">{{probe.length ? '≈ ' + suggested(r.h) : 'auto'}}</span>
-            <input v-else-if="r.h !== 'raw'" v-model="r.rate" :disabled="!r.on || +r.h > maxHeight" aria-label="bitrate">
+          <label class="rung" v-for="r in config.rungs" :key="r.h" :class="{off: rungOff(r)}"
+            :title="r.h === 'hdr' ? 'เข้ารหัสความละเอียดเดิมเป็น HEVC 10-bit HDR10 (Dolby Vision หาย) · ต้องมี GPU' : ''">
+            <input type="checkbox" v-model="r.on" :disabled="rungOff(r)">
+            <span>{{r.h === 'raw' ? 'ต้นฉบับ (raw)' : r.h === 'hdr' ? 'HDR (HEVC)' : r.h + 'p'}}</span>
+            <span v-if="isHeight(r) && config.autoBitrate" class="auto-rate">{{probe.length ? '≈ ' + suggested(r.h) : 'auto'}}</span>
+            <input v-else-if="r.h !== 'raw'" v-model="r.rate" :disabled="!r.on || rungOff(r)" aria-label="bitrate">
             <small v-else class="muted">คัดลอกสตรีมเดิม</small>
           </label>
         </div>
@@ -193,7 +213,7 @@ createApp({
     remoteProbeTimer: null, remoteSort: Shared.load('studio-remote-sort', 'name'),
     files: [], selectedFiles: [], fileSearch: '', fileSort: 'modified', filesLoadedAt: 0, uploads: [],
     convertFiles: [], probe: [], probeBusy: false, inspected: [],
-    config: { ...structuredClone(HLS_DEFAULTS), ...Shared.load('studio-hls', {}) },
+    config: withHdrRung({ ...structuredClone(HLS_DEFAULTS), ...Shared.load('studio-hls', {}) }),
   } },
   computed: {
     visible() { return this.jobs.filter(job => job.kind !== 'torrent_inspect') },

@@ -259,6 +259,8 @@ def engine_env(config):
         env.update(PREP_LADDER="1", PREP_FORCE_VIDEO_ENCODE="1")
         put("PREP_LADDER_HEIGHTS", config.get("ladder_heights"))
         put("PREP_LADDER_BITRATES", ladder_bitrates(config.get("ladder_bitrates")))
+        # The 'hdr' rung (source-resolution HEVC Main 10 HDR) takes its own bitrate, not a ladder entry.
+        put("PREP_HDR_BITRATE", config.get("hdr_bitrate"))
     elif config.get("reencode"):
         env["PREP_FORCE_VIDEO_ENCODE"] = "1"
         if height:

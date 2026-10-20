@@ -27,6 +27,11 @@ class EngineEnvTests(unittest.TestCase):
         auto = engine_env({"auto_hdr": True, "ladder_bitrates": "2160=16M,1080=8M,720=4M"})
         self.assertEqual((auto["PREP_LADDER_HEIGHTS"], auto["PREP_LADDER_BITRATES"], auto["PREP_GPU_TONEMAP"]),
                          ("raw,1080,720", "1080:8M,720:4M", "1"))
+        # A ladder can mix an HEVC HDR rung at its own bitrate with H.264 SDR rungs.
+        mixed = engine_env({"ladder": True, "ladder_heights": "hdr,1080,720", "ladder_bitrates": "1080:4M,720:2M",
+                            "hdr_bitrate": "6M"})
+        self.assertEqual((mixed["PREP_LADDER_HEIGHTS"], mixed["PREP_LADDER_BITRATES"], mixed["PREP_HDR_BITRATE"]),
+                         ("hdr,1080,720", "1080:4M,720:2M", "6M"))
         self.assertEqual(engine_env({"preserve_hdr": True, "video_bitrate": "15M"}),
                          {"PREP_LADDER": "1", "PREP_LADDER_HEIGHTS": "hdr", "PREP_HDR_BITRATE": "15M"})
 
