@@ -794,6 +794,20 @@ add_hdr_video() {
     if [ -n "$h" ] && [ "$scale_mode" != "none" ]; then
       video_args+=(-filter:v:"$i" "scale_cuda=${scale_w}:${scale_h}:format=p010le")
     fi
+  elif [[ " ${input_args[*]} " == *" -hwaccel_output_format cuda "* ]]; then
+    # A GPU-tonemapped SDR ladder decodes with NVDEC into CUDA frames, and this
+    # rung reads that same decoded stream, so it has to stay on the GPU: a CPU
+    # format=/scale= cannot take CUDA frames ("Impossible to convert between the
+    # formats ... auto_scale"). NVENC encodes CUDA P010 surfaces directly.
+    if [ "$hdr_venc" = "hevc_nvenc" ]; then
+      if [ -n "$h" ] && [ "$scale_mode" != "none" ]; then
+        video_args+=(-filter:v:"$i" "scale_cuda=${scale_w}:${scale_h}:format=p010le")
+      fi
+    elif [ -n "$h" ] && [ "$scale_mode" != "none" ]; then
+      video_args+=(-filter:v:"$i" "hwdownload,format=p010le,scale=${scale_w}:${scale_h}")
+    else
+      video_args+=(-filter:v:"$i" 'hwdownload,format=p010le')
+    fi
   elif [ "$hdr_venc" = "hevc_videotoolbox" ] && [ "$apple_vt_hdr" = "1" ] && [ -n "$h" ]; then
     # scale_vt with no colour arguments resizes without converting, so PQ/HLG
     # stays PQ/HLG. Fit inside the tier box so cinema crops keep their aspect.
