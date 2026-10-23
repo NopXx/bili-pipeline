@@ -408,6 +408,7 @@
           <div class="selection" v-if="selectedFiles.length">
             <span>เลือก {{selectedFiles.length}} ไฟล์ · {{size(selectedFilesSize)}}</span>
             <button class="small" @click="upload">อัปโหลดไป Drive</button>
+            <button class="ghost small" @click="renameFile" v-if="selectedFiles.length === 1">เปลี่ยนชื่อ</button>
             <button class="danger small" @click="deleteFiles">ลบจากเครื่อง</button>
           </div>
           <p class="hint">อัปโหลดไฟล์ต้นฉบับโดยไม่แปลง HLS ผ่าน rclone remote ที่ตั้งไว้ใน notebook</p>

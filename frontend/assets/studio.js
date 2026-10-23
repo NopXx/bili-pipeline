@@ -554,6 +554,18 @@ createApp({
       if (!confirm(`อัปโหลดไฟล์ต้นฉบับ ${this.selectedFiles.length} ไฟล์ขึ้น Drive โดยไม่แปลง HLS?`)) return
       try { const r = await this.api('/api/upload', { files: this.selectedFiles }); this.selectedFiles = []; this.queued(r.job, 'เพิ่มงานอัปโหลดแล้ว') } catch (error) { this.fail(error) }
     },
+    async renameFile() {
+      const [path] = this.selectedFiles
+      const current = path && this.basename(path)
+      const name = current && prompt('ชื่อไฟล์ใหม่', current)?.trim()
+      if (!name || name === current) return
+      try {
+        const r = await this.api('/api/rename/downloads', { path, name })
+        this.selectedFiles = [r.path]; this.inspected = []
+        await this.loadFiles()
+        this.notify(`เปลี่ยนชื่อเป็น ${name} แล้ว`, 'ok')
+      } catch (error) { this.fail(error) }
+    },
     async deleteFiles() {
       const paths = [...this.selectedFiles]
       if (!paths.length || !confirm(`ลบไฟล์ที่เลือก ${paths.length} ไฟล์ (${this.size(this.selectedFilesSize)}) ออกจากเครื่องถาวรหรือไม่?`)) return

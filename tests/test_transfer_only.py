@@ -98,6 +98,9 @@ class TransferOnlyTests(unittest.TestCase):
                 inside.write_bytes(b"downloaded")
                 protected = post("/api/delete/downloads", {"paths": [str(source), str(inside)]})
                 self.assertEqual(protected, {"deleted": 0, "failed": 2})
+                with self.assertRaises(urllib.error.HTTPError) as busy_rename:
+                    post("/api/rename/downloads", {"path": str(source), "name": "other.mkv"})
+                self.assertEqual(busy_rename.exception.code, 409)
                 self.assertTrue(source.exists())
                 self.assertTrue(inside.exists())
                 web.jobs[job]["status"] = "completed"
@@ -108,6 +111,23 @@ class TransferOnlyTests(unittest.TestCase):
                 self.assertEqual(deleted, {"deleted": 1, "failed": 1})
                 self.assertFalse(inside.exists())
                 self.assertTrue(outside.exists())
+                for bad_name in ("../escape.mkv", "a/b.mkv", "", "film.mkv.part", "trailing."):
+                    with self.assertRaises(urllib.error.HTTPError) as bad_rename:
+                        post("/api/rename/downloads", {"path": str(source), "name": bad_name})
+                    self.assertEqual(bad_rename.exception.code, 400, bad_name)
+                taken = source.with_name("taken.mkv")
+                taken.write_bytes(b"other")
+                with self.assertRaises(urllib.error.HTTPError) as clash:
+                    post("/api/rename/downloads", {"path": str(source), "name": "taken.mkv"})
+                self.assertEqual(clash.exception.code, 409)
+                with self.assertRaises(urllib.error.HTTPError) as escape:
+                    post("/api/rename/downloads", {"path": str(outside), "name": "moved.txt"})
+                self.assertEqual(escape.exception.code, 409)
+                renamed = post("/api/rename/downloads", {"path": str(source), "name": "ฟิล์ม 2021.mkv"})
+                self.assertEqual(renamed["path"], str(source.with_name("ฟิล์ม 2021.mkv")))
+                self.assertFalse(source.exists())
+                self.assertEqual(Path(renamed["path"]).read_bytes(), b"sample")
+                self.assertEqual(taken.read_bytes(), b"other")
             finally:
                 server.shutdown()
                 server.server_close()

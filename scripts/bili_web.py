@@ -344,6 +344,46 @@ def enqueue_process(body, pipeline=None):
     return job
 
 
+def active_job_paths():
+    """(kind, realpath) pairs that queued/running/paused jobs still read or write.
+    Call with queue.lock held."""
+    protected = []
+    for item in jobs.values():
+        if item["status"] not in ("queued", "running", "paused"):
+            continue
+        if item["lane"] == "download" and len(item["command"]) > 3 and item["command"][1] == TORRENT_DOWNLOAD:
+            protected.append(("directory", os.path.realpath(item["command"][3])))
+        try:
+            with open(item["meta"], encoding="utf-8") as handle:
+                meta = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        for path in (meta.get("files") or []) + (meta.get("paths") or []):
+            protected.append(("file", os.path.realpath(path)))
+        if item["lane"] == "download" and meta.get("destination"):
+            protected.append(("directory", os.path.realpath(meta["destination"])))
+    return protected
+
+
+def editable_download(path, protected):
+    """True when a finished file under DOWNLOADS_DIR is safe to delete or rename."""
+    real = os.path.realpath(path)
+    return not (not os.path.isabs(path) or not real.startswith(DOWNLOADS_DIR + os.sep)
+                or os.path.islink(path) or not os.path.isfile(path) or path.endswith((".aria2", ".part"))
+                or os.path.exists(path + ".aria2")
+                or any(real == target if kind == "file" else real.startswith(target + os.sep)
+                       for kind, target in protected))
+
+
+def valid_rename(name):
+    """A new basename for a downloaded file, or None when it is unusable."""
+    name = str(name or "").strip()
+    if (not name or name in (".", "..") or len(name.encode("utf-8")) > 240 or name.endswith((".", " "))
+            or re.search(r'[\\/:*?"<>|\x00-\x1f\x7f]', name) or name.endswith((".aria2", ".part", ".partial"))):
+        return None
+    return name
+
+
 def safe_upload_name(name):
     """Filesystem-safe basename for a browser-uploaded file."""
     cleaned = re.sub(r'[\\/\x00-\x1f\x7f]', '_', os.path.basename(str(name or ""))).rstrip(" .")[:200]
@@ -951,6 +991,7 @@ class H(BaseHTTPRequestHandler):
         "/api/files/upload": "handle_file_upload",
         "/api/files/drive": "handle_list_drive",
         "/api/delete/downloads": "handle_delete_downloads",
+        "/api/rename/downloads": "handle_rename_download",
         "/api/delete/drive": "handle_delete_drive",
     }
 
@@ -1850,28 +1891,9 @@ class H(BaseHTTPRequestHandler):
             return self._send(400, json.dumps({"error": "select 1–1000 downloaded files"}))
         deleted = failed = 0
         with queue.lock:
-            protected = []
-            for item in jobs.values():
-                if item["status"] not in ("queued", "running", "paused"):
-                    continue
-                if item["lane"] == "download" and len(item["command"]) > 3 and item["command"][1] == TORRENT_DOWNLOAD:
-                    protected.append(("directory", os.path.realpath(item["command"][3])))
-                try:
-                    with open(item["meta"], encoding="utf-8") as handle:
-                        meta = json.load(handle)
-                except (OSError, ValueError):
-                    continue
-                for path in (meta.get("files") or []) + (meta.get("paths") or []):
-                    protected.append(("file", os.path.realpath(path)))
-                if item["lane"] == "download" and meta.get("destination"):
-                    protected.append(("directory", os.path.realpath(meta["destination"])))
+            protected = active_job_paths()
             for p in dict.fromkeys(path for path in paths if isinstance(path, str)):
-                rp = os.path.realpath(p)
-                if (not os.path.isabs(p) or not rp.startswith(DOWNLOADS_DIR + os.sep)
-                        or os.path.islink(p) or not os.path.isfile(p) or p.endswith((".aria2", ".part"))
-                        or os.path.exists(p + ".aria2")
-                        or any(rp == target if kind == "file" else rp.startswith(target + os.sep)
-                               for kind, target in protected)):
+                if not editable_download(p, protected):
                     failed += 1
                     continue
                 try:
@@ -1881,6 +1903,22 @@ class H(BaseHTTPRequestHandler):
                     failed += 1
             failed += sum(not isinstance(path, str) for path in paths)
         self._send(200, json.dumps({"deleted": deleted, "failed": failed}))
+
+    def handle_rename_download(self, body):
+        path, name = body.get("path"), valid_rename(body.get("name"))
+        if not isinstance(path, str) or not name:
+            return self._send(400, json.dumps({"error": 'ชื่อไฟล์ไม่ถูกต้อง (ห้ามมี / \\ : * ? " < > | และห้ามลงท้ายด้วยจุดหรือเว้นวรรค)'}))
+        target = os.path.join(os.path.dirname(path), name)
+        with queue.lock:
+            if not editable_download(path, active_job_paths()):
+                return self._send(409, json.dumps({"error": "เปลี่ยนชื่อไม่ได้: ไฟล์ไม่มีอยู่ หรือมีงานในคิวกำลังใช้ไฟล์นี้"}))
+            if target == path:
+                return self._send(200, json.dumps({"path": path}))
+            # A case-only rename on Windows sees the file itself as "existing".
+            if os.path.lexists(target) and not os.path.samefile(path, target):
+                return self._send(409, json.dumps({"error": "มีไฟล์ชื่อนี้อยู่แล้วในโฟลเดอร์เดียวกัน"}))
+            os.rename(path, target)
+        self._send(200, json.dumps({"path": target}))
 
     def handle_list_drive(self, body):
         r = subprocess.run(

@@ -269,6 +269,7 @@
             <button class="small" @click="openConverter(selectedFiles)" :disabled="!selectedVideos.length">แปลง HLS</button>
             <button class="ghost small" @click="inspectSelected" :disabled="probeBusy"><span class="spinner dim" v-if="probeBusy"></span>ตรวจไฟล์</button>
             <button class="ghost small" @click="uploadSource">อัปโหลดต้นฉบับ</button>
+            <button class="ghost small" @click="renameFile" v-if="selectedFiles.length === 1">เปลี่ยนชื่อ</button>
             <button class="danger small" @click="deleteFiles">ลบ</button>
           </div>
           <div class="files">
