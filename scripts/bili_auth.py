@@ -12,6 +12,8 @@ Cookies never leave the server: the API only returns the account name/uid.
 from http.cookiejar import CookieJar
 import json
 import os
+
+import atomic_file
 import subprocess
 import urllib.parse
 import urllib.request
@@ -55,7 +57,7 @@ def _write_config(path, config):
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as out:
         json.dump(config, out, ensure_ascii=False, indent=4)
-    os.replace(temporary, path)
+    atomic_file.replace(temporary, path)
 
 
 def start():

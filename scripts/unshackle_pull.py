@@ -13,6 +13,8 @@ SIGTERM (the web UI's cancel) cancels the unshackle job too.
 
 import json
 import os
+
+import atomic_file
 import re
 import signal
 import sys
@@ -68,7 +70,7 @@ def update_state(state_path, **values):
     temporary = state_path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False)
-    os.replace(temporary, state_path)
+    atomic_file.replace(temporary, state_path)
 
 
 def main(config_path, state_path):

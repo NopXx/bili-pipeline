@@ -3,6 +3,8 @@
 
 import json
 import os
+
+import atomic_file
 import re
 import subprocess
 import sys
@@ -96,7 +98,7 @@ def write_state(path, value):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as handle:
         json.dump(value, handle, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    atomic_file.replace(tmp, path)
 
 
 def downloaded_files(root):

@@ -2,6 +2,8 @@
 """Validate downloaded media, build HLS with the selected profile, then upload."""
 import json
 import os
+
+import atomic_file
 from pathlib import Path
 import re
 import shutil
@@ -63,7 +65,7 @@ def update_state(path, **values):
     data.update(values)
     temporary = Path(str(path) + ".tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    atomic_file.replace(temporary, path)
 
 
 def probe(path):

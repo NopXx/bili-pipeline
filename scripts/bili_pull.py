@@ -18,6 +18,8 @@ subtitles), BILI_LIMIT (max episodes, default 500).
 """
 import json
 import os
+
+import atomic_file
 import sys
 import time
 import urllib.error
@@ -76,7 +78,7 @@ def update_job_state(**values):
     tmp = state_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, state_path)
+    atomic_file.replace(tmp, state_path)
 
 
 def cancel_tasks(task_ids):

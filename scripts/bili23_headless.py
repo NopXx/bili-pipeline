@@ -25,6 +25,8 @@ puts the QR-login cookies back if Bili23 rewrites config.json while quitting.
 """
 import json
 import os
+
+import atomic_file
 from pathlib import Path
 import re
 import secrets
@@ -63,7 +65,7 @@ def write_config(config):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(config, ensure_ascii=False, indent=4), encoding="utf-8")
-    os.replace(temporary, path)
+    atomic_file.replace(temporary, path)
 
 
 def install():

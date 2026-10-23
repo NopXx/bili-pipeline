@@ -2,6 +2,8 @@
 
 import json
 import os
+
+import atomic_file
 from pathlib import Path
 import signal
 import subprocess
@@ -11,6 +13,27 @@ import time
 
 LANES = ("inspect", "download", "convert", "upload")
 ACTIVE = {"queued", "running", "paused"}
+
+
+def signal_tree_windows(pid, name):
+    """Windows stand-in for os.killpg: suspend, resume or kill a process and its children."""
+    import psutil
+
+    try:
+        root = psutil.Process(pid)
+        tree = root.children(recursive=True) + [root]
+    except psutil.NoSuchProcess:
+        return
+    for proc in tree:
+        try:
+            if name == "SIGSTOP":
+                proc.suspend()
+            elif name == "SIGCONT":
+                proc.resume()
+            else:
+                proc.kill()
+        except psutil.NoSuchProcess:
+            pass
 
 
 def visible_convert_gpus():
@@ -73,7 +96,7 @@ class JobQueue:
         data.update(changes)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, path)
+        atomic_file.replace(temporary, path)
 
     def _persist(self, item):
         record = {key: item[key] for key in ("job", "lane", "command", "env_overrides", "log", "state", "meta", "status", "created_at", "gpu", "started_at", "finished_at")}
@@ -81,7 +104,7 @@ class JobQueue:
         path = self.root / f"{item['job']}.queue.json"
         temporary = Path(str(path) + ".tmp")
         temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, path)
+        atomic_file.replace(temporary, path)
 
     def _recover(self):
         for path in self.root.glob("*.queue.json"):
@@ -151,13 +174,14 @@ class JobQueue:
             self._persist(item)
             return item
 
-    def _signal(self, item, sig):
+    def _signal(self, item, name):
         proc = item["proc"]
         if proc is None or proc.poll() is not None:
             raise RuntimeError("job process is no longer running")
-        if not hasattr(os, "killpg"):
-            raise RuntimeError("process pause requires a Unix host")
-        os.killpg(proc.pid, sig)
+        if hasattr(os, "killpg"):
+            os.killpg(proc.pid, getattr(signal, name))
+        else:
+            signal_tree_windows(proc.pid, name)
 
     def pause(self, job, before_pause=None):
         with self.lock:
@@ -169,7 +193,7 @@ class JobQueue:
             elif item["status"] == "running":
                 if before_pause:
                     before_pause(item)
-                self._signal(item, signal.SIGSTOP)
+                self._signal(item, "SIGSTOP")
                 item["status"] = "paused"
             else:
                 raise ValueError("job is not running or queued")
@@ -191,7 +215,7 @@ class JobQueue:
                     raise ValueError("queue lane is busy; resume after the current job finishes")
                 if before_resume:
                     before_resume(item)
-                self._signal(item, signal.SIGCONT)
+                self._signal(item, "SIGCONT")
                 item["status"] = "running"
             self._state(item, status=item["status"], phase=item["lane"])
             self._persist(item)
@@ -208,8 +232,8 @@ class JobQueue:
             proc = item["proc"]
             if proc is not None and proc.poll() is None:
                 if item["status"] == "paused":
-                    self._signal(item, signal.SIGCONT)
-                os.killpg(proc.pid, signal.SIGTERM)
+                    self._signal(item, "SIGCONT")
+                self._signal(item, "SIGTERM")
             item["status"] = "cancelled"
             item["cancelled"] = True
             item["finished_at"] = time.time()
@@ -255,7 +279,10 @@ class JobQueue:
                             busy = {other["gpu"] for other in self.jobs.values()
                                     if other["lane"] == "convert" and other["status"] == "running"}
                             gpu = next(device for device in self.convert_gpus if device not in busy)
-                        worker_env = {**os.environ, **item["env_overrides"], "BILI_QUEUE_JOB_ID": item["job"]}
+                        # The log is UTF-8; without this, Python workers on Windows print in cp1252
+                        # and crash on non-Latin filenames.
+                        worker_env = {"PYTHONIOENCODING": "utf-8", **os.environ, **item["env_overrides"],
+                                      "BILI_QUEUE_JOB_ID": item["job"]}
                         if gpu is not None:
                             worker_env["CUDA_VISIBLE_DEVICES"] = gpu
                         log_event(item["log"], f"started on GPU {gpu}" if gpu is not None else "started")
